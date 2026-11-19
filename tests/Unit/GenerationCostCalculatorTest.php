@@ -3,7 +3,7 @@
 use App\Services\Pixelforge\GenerationCostCalculator;
 
 it('calculates provider cost and customer price from token usage', function () {
-    $calculator = new GenerationCostCalculator();
+    $calculator = new GenerationCostCalculator;
 
     $result = $calculator->calculate(
         usage: [
@@ -25,7 +25,7 @@ it('calculates provider cost and customer price from token usage', function () {
 });
 
 it('calculates zero cost when usage is zero', function () {
-    $calculator = new GenerationCostCalculator();
+    $calculator = new GenerationCostCalculator;
 
     $result = $calculator->calculate(
         usage: [
@@ -47,7 +47,7 @@ it('calculates zero cost when usage is zero', function () {
 });
 
 it('rejects missing token usage fields', function () {
-    $calculator = new GenerationCostCalculator();
+    $calculator = new GenerationCostCalculator;
 
     $calculator->calculate(
         usage: [
@@ -65,7 +65,7 @@ it('rejects missing token usage fields', function () {
 })->throws(InvalidArgumentException::class);
 
 it('rejects negative token usage', function () {
-    $calculator = new GenerationCostCalculator();
+    $calculator = new GenerationCostCalculator;
 
     $calculator->calculate(
         usage: [
@@ -84,7 +84,7 @@ it('rejects negative token usage', function () {
 })->throws(InvalidArgumentException::class);
 
 it('rejects malformed pricing rates', function () {
-    $calculator = new GenerationCostCalculator();
+    $calculator = new GenerationCostCalculator;
 
     $calculator->calculate(
         usage: [
@@ -103,7 +103,7 @@ it('rejects malformed pricing rates', function () {
 })->throws(InvalidArgumentException::class);
 
 it('rejects negative pricing rates', function () {
-    $calculator = new GenerationCostCalculator();
+    $calculator = new GenerationCostCalculator;
 
     $calculator->calculate(
         usage: [
@@ -121,9 +121,8 @@ it('rejects negative pricing rates', function () {
     );
 })->throws(InvalidArgumentException::class);
 
-
 it('rejects missing pricing rate fields', function () {
-    $calculator = new GenerationCostCalculator();
+    $calculator = new GenerationCostCalculator;
 
     $calculator->calculate(
         usage: [
@@ -141,7 +140,7 @@ it('rejects missing pricing rate fields', function () {
 })->throws(InvalidArgumentException::class);
 
 it('rejects fractional token counts', function () {
-    $calculator = new GenerationCostCalculator();
+    $calculator = new GenerationCostCalculator;
 
     $calculator->calculate(
         usage: [
