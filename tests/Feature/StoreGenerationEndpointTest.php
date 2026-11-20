@@ -3,8 +3,13 @@
 use App\Models\Generation;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Queue;
 
 uses(RefreshDatabase::class);
+
+beforeEach(function () {
+    Queue::fake();
+});
 
 it('requires authentication to create a generation', function () {
     $response = $this->postJson('/generations', [

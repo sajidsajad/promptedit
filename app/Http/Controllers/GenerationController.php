@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Exceptions\IdempotencyConflictException;
 use App\Http\Requests\StoreGenerationRequest;
+use App\Jobs\SubmitGeneration;
 use App\Services\Generations\GenerationCreationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Validation\ValidationException;
@@ -42,6 +43,12 @@ class GenerationController extends Controller
             return response()->json([
                 'message' => $exception->getMessage(),
             ], 409);
+        }
+
+        // Dispatch only for a newly created generation.
+        // The service transaction has committed before this point.
+        if (! $result['replayed']) {
+            SubmitGeneration::dispatch($result['generation']->id);
         }
 
         return response()->json([
