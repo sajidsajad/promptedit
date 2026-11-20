@@ -1,9 +1,11 @@
 <?php
 
-uses(Tests\TestCase::class);
-
 use App\Services\Pixelforge\PixelforgeClient;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Http;
+use Tests\TestCase;
+
+uses(TestCase::class);
 
 beforeEach(function () {
     config([
@@ -55,7 +57,7 @@ it('throws an exception when pricing retrieval fails', function () {
 
     expect(
         fn () => app(PixelforgeClient::class)->getPricing()
-    )->toThrow(\Illuminate\Http\Client\RequestException::class);
+    )->toThrow(RequestException::class);
 });
 
 it('submits generation requests with bearer authentication and idempotency', function () {
@@ -90,7 +92,6 @@ it('submits generation requests with bearer authentication and idempotency', fun
             && $request['prompt'] === 'A mountain landscape';
     });
 });
-
 
 it('retrieves generation status with bearer authentication', function () {
     Http::fake([
