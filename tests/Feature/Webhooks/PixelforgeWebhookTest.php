@@ -1,7 +1,9 @@
 <?php
 
+use App\Jobs\ProcessPixelforgeWebhook;
 use App\Models\WebhookEvent;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Queue;
 
 uses(RefreshDatabase::class);
 
@@ -59,7 +61,9 @@ it('rejects a webhook with an invalid signature', function () {
     $rawBody = json_encode($payload, JSON_THROW_ON_ERROR);
 
     $headers = signedPixelforgeWebhookHeaders($rawBody);
-    $headers['Pixelforge-Signature'] = 't='.time().',v1='.str_repeat('a', 64);
+
+    $headers['HTTP_PIXELFORGE_SIGNATURE'] =
+        't='.time().',v1='.str_repeat('a', 64);
 
     $this->call(
         'POST',
@@ -67,7 +71,7 @@ it('rejects a webhook with an invalid signature', function () {
         [],
         [],
         [],
-        ['CONTENT_TYPE' => 'application/json'],
+        $headers,
         $rawBody
     )->assertUnauthorized();
 
@@ -91,7 +95,9 @@ it('rejects a webhook when required headers are missing', function () {
     expect(WebhookEvent::count())->toBe(0);
 });
 
-it('accepts and persists a valid signed webhook', function () {
+it('accepts and persists a valid signed webhook and dispatches one job', function () {
+    Queue::fake();
+
     $payload = pixelforgeWebhookPayload();
     $rawBody = json_encode($payload, JSON_THROW_ON_ERROR);
     $headers = signedPixelforgeWebhookHeaders($rawBody);
@@ -103,7 +109,6 @@ it('accepts and persists a valid signed webhook', function () {
         [],
         [],
         $headers,
-
         $rawBody
     );
 
@@ -114,15 +119,22 @@ it('accepts and persists a valid signed webhook', function () {
         'provider_generation_id' => 'gen_test_001',
         'event_type' => 'generation.processing',
     ]);
+
+    Queue::assertPushed(
+        ProcessPixelforgeWebhook::class,
+        fn (ProcessPixelforgeWebhook $job) => $job->eventId === 'evt_test_001'
+    );
 });
 
-it('acknowledges duplicate event IDs without storing duplicates', function () {
+it('acknowledges duplicate event IDs without dispatching duplicate jobs', function () {
+    Queue::fake();
+
     $payload = pixelforgeWebhookPayload();
     $rawBody = json_encode($payload, JSON_THROW_ON_ERROR);
     $headers = signedPixelforgeWebhookHeaders($rawBody);
 
     foreach ([1, 2] as $attempt) {
-        $headers['Pixelforge-Delivery-Attempt'] = (string) $attempt;
+        $headers['HTTP_PIXELFORGE_DELIVERY_ATTEMPT'] = (string) $attempt;
 
         $this->call(
             'POST',
@@ -130,10 +142,13 @@ it('acknowledges duplicate event IDs without storing duplicates', function () {
             [],
             [],
             [],
-            $headers, $rawBody
+            $headers,
+            $rawBody
         )->assertAccepted();
     }
 
     expect(WebhookEvent::where('event_id', 'evt_test_001')->count())
         ->toBe(1);
+
+    Queue::assertPushed(ProcessPixelforgeWebhook::class, 1);
 });

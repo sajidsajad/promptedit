@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Jobs\ProcessPixelforgeWebhook;
 use App\Models\WebhookEvent;
 use App\Services\Pixelforge\PixelforgeWebhookSignatureVerifier;
 use Illuminate\Http\JsonResponse;
@@ -105,7 +106,7 @@ class PixelforgeWebhookController extends Controller
             ], 400);
         }
 
-        WebhookEvent::firstOrCreate(
+        $event = WebhookEvent::firstOrCreate(
             ['event_id' => $eventId],
             [
                 'provider_generation_id' => $generation['id'],
@@ -113,6 +114,10 @@ class PixelforgeWebhookController extends Controller
                 'payload' => $payload,
             ]
         );
+
+        if ($event->wasRecentlyCreated) {
+            ProcessPixelforgeWebhook::dispatch($eventId);
+        }
 
         return response()->json(['received' => true], 202);
     }
