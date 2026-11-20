@@ -7,6 +7,7 @@ use App\Services\Generations\GenerationProviderService;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Http\Client\RequestException;
+use Illuminate\Http\Client\Response;
 use Throwable;
 
 class SubmitGeneration implements ShouldQueue
@@ -19,7 +20,7 @@ class SubmitGeneration implements ShouldQueue
     public int $tries = 5;
 
     /**
-     * Delay between retry attempts, in seconds.
+     * Default delay between retry attempts, in seconds.
      */
     public array $backoff = [5, 15, 30, 60, 120];
 
@@ -27,6 +28,11 @@ class SubmitGeneration implements ShouldQueue
      * Maximum execution time for one attempt.
      */
     public int $timeout = 45;
+
+    /**
+     * Provider-requested retry delay, when available.
+     */
+    public ?int $retryAfterSeconds = null;
 
     public function __construct(
         public readonly int $generationId
@@ -40,7 +46,6 @@ class SubmitGeneration implements ShouldQueue
     ): void {
         $generation = Generation::find($this->generationId);
 
-        // The generation may have been deleted before the job ran.
         if (! $generation) {
             return;
         }
@@ -66,28 +71,59 @@ class SubmitGeneration implements ShouldQueue
                 ? ($body['error']['message'] ?? $body['message'] ?? null)
                 : null;
 
-            // These responses indicate that retrying the same request
-            // will not solve the problem.
+            // Permanent errors should not be retried.
             $permanentFailure = in_array(
                 $status,
                 [400, 401, 403, 404, 409, 422],
                 true
-            ) || (
-                $status === 429
-                && $errorCode === 'daily_limit_exceeded'
             );
 
-            if (! $permanentFailure) {
-                // Rate limits, concurrency limits, overloads and server
-                // errors are temporary. Let Laravel retry the job.
-                throw $exception;
+            if ($permanentFailure) {
+                $this->markPermanentFailure(
+                    $errorCode ?: 'provider_request_rejected',
+                    $errorMessage ?: 'Pixelforge rejected the generation request.'
+                );
+
+                return;
             }
 
-            $this->markPermanentFailure(
-                $errorCode ?: 'provider_request_rejected',
-                $errorMessage ?: 'Pixelforge rejected the generation request.'
+            // Use Pixelforge's requested delay when available.
+            $this->retryAfterSeconds = $this->resolveRetryAfter(
+                $response,
+                $errorCode
             );
+
+            // Let Laravel's queue worker perform the retry.
+            throw $exception;
         }
+    }
+
+    /**
+     * Return the provider-requested delay or the default backoff schedule.
+     */
+    public function backoff(): int|array
+    {
+        return $this->retryAfterSeconds ?? $this->backoff;
+    }
+
+    /**
+     * Resolve the retry delay from the provider response.
+     */
+    private function resolveRetryAfter(
+        ?Response $response,
+        ?string $errorCode
+    ): ?int {
+        $header = $response?->header('Retry-After');
+
+        if (is_string($header) && ctype_digit($header)) {
+            return max(1, min((int) $header, 3600));
+        }
+
+        return match ($errorCode) {
+            'concurrency_limit_exceeded' => 5,
+            'overloaded' => 2,
+            default => null,
+        };
     }
 
     /**
@@ -121,9 +157,8 @@ class SubmitGeneration implements ShouldQueue
     /**
      * Record exhausted retries for investigation.
      *
-     * A timeout may mean Pixelforge accepted the request but our application
-     * never received its response. Therefore, do not mark it failed here.
-     * The stable provider idempotency key allows a safe later retry.
+     * Do not mark the generation failed here: Pixelforge may have accepted
+     * the request even if our application never received its response.
      */
     public function failed(Throwable $exception): void
     {
@@ -143,6 +178,7 @@ class SubmitGeneration implements ShouldQueue
             0,
             5000
         );
+
         $generation->save();
     }
 }
