@@ -1,11 +1,14 @@
 <?php
 
+use App\Jobs\ProcessPixelforgeWebhook;
 use App\Models\Generation;
 use App\Models\User;
+use App\Models\WebhookEvent;
 use App\Services\Generations\GenerationProviderService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
 uses(TestCase::class, RefreshDatabase::class);
@@ -185,4 +188,101 @@ it('reuses the existing pricing snapshot when retrying submission', function () 
         fn ($request) => $request->url() ===
             'https://pixelforge.promptedit.dev/v1/pricing'
     );
+});
+
+it('redispatches an early webhook after associating the provider generation ID', function () {
+    Queue::fake();
+
+    $generation = createQueuedGeneration([
+        'pricing_rates' => pixelforgePricingResponse()['rates'],
+    ]);
+
+    $event = WebhookEvent::create([
+        'event_id' => 'evt_test_early_dispatch_001',
+        'generation_id' => null,
+        'provider_generation_id' => 'gen_early_dispatch_001',
+        'event_type' => 'generation.processing',
+        'payload' => [
+            'id' => 'evt_test_early_dispatch_001',
+            'object' => 'event',
+            'type' => 'generation.processing',
+            'data' => [
+                'object' => [
+                    'id' => 'gen_early_dispatch_001',
+                    'object' => 'generation',
+                    'status' => 'processing',
+                ],
+            ],
+        ],
+    ]);
+
+    Http::fake([
+        'pixelforge.promptedit.dev/v1/generations' => Http::response([
+            'id' => 'gen_early_dispatch_001',
+            'object' => 'generation',
+            'status' => 'queued',
+        ], 202),
+    ]);
+
+    $result = app(GenerationProviderService::class)->submit($generation);
+
+    $event->refresh();
+    $result->refresh();
+
+    expect($result->pixelforge_id)->toBe('gen_early_dispatch_001')
+        ->and($event->generation_id)->toBe($result->id)
+        ->and($event->processed_at)->toBeNull();
+
+    Queue::assertPushed(
+        ProcessPixelforgeWebhook::class,
+        fn (ProcessPixelforgeWebhook $job) => $job->eventId ===
+            'evt_test_early_dispatch_001'
+    );
+});
+
+it('rejects an unexpected succeeded status in a generation creation response', function () {
+    Http::fake([
+        'pixelforge.promptedit.dev/v1/generations' => Http::response([
+            'id' => 'gen_unexpected_success_001',
+            'object' => 'generation',
+            'status' => 'succeeded',
+        ], 202),
+    ]);
+
+    $generation = createQueuedGeneration([
+        'pricing_rates' => pixelforgePricingResponse()['rates'],
+    ]);
+
+    expect(
+        fn () => app(GenerationProviderService::class)->submit($generation)
+    )->toThrow(UnexpectedValueException::class);
+
+    $generation->refresh();
+
+    expect($generation->pixelforge_id)->toBeNull()
+        ->and($generation->status)->toBe('queued');
+});
+
+it('does not regress an already processing generation when the provider responds queued', function () {
+    Http::fake([
+        'pixelforge.promptedit.dev/v1/generations' => Http::response([
+            'id' => 'gen_already_processing_001',
+            'object' => 'generation',
+            'status' => 'queued',
+        ], 202),
+    ]);
+
+    $generation = createQueuedGeneration([
+        'status' => 'processing',
+        'pricing_rates' => pixelforgePricingResponse()['rates'],
+        'started_at' => now()->subMinute(),
+    ]);
+
+    $result = app(GenerationProviderService::class)->submit($generation);
+
+    $result->refresh();
+
+    expect($result->pixelforge_id)->toBe('gen_already_processing_001')
+        ->and($result->status)->toBe('processing')
+        ->and($result->started_at)->not->toBeNull();
 });
