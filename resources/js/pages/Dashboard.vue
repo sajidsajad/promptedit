@@ -46,11 +46,19 @@ interface GenerationPagination {
     links: PaginationLink[];
 }
 
+interface BillingSummary {
+    successful_generations: number;
+    provider_cost_total: string;
+    customer_charges_total: string;
+    markup_total: string;
+}
+
 interface Props {
     generations: GenerationPagination;
     filters: {
         status: GenerationStatus | null;
     };
+    billing: BillingSummary;
 }
 
 const props = defineProps<Props>();
@@ -154,6 +162,56 @@ function formatUsd(amount: string): string {
                 {{ generations.total }} total generations
             </div>
         </section>
+
+<section class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+    <article class="rounded-xl border border-sidebar-border/70 p-4 dark:border-sidebar-border">
+        <p class="text-sm text-muted-foreground">
+            Successful generations
+        </p>
+        <p class="mt-2 text-2xl font-semibold tabular-nums">
+            {{ billing.successful_generations }}
+        </p>
+        <p class="mt-1 text-xs text-muted-foreground">
+            Successfully completed images
+        </p>
+    </article>
+
+    <article class="rounded-xl border border-sidebar-border/70 p-4 dark:border-sidebar-border">
+        <p class="text-sm text-muted-foreground">
+            Provider cost
+        </p>
+        <p class="mt-2 text-2xl font-semibold tabular-nums">
+            {{ formatUsd(billing.provider_cost_total) }}
+        </p>
+        <p class="mt-1 text-xs text-muted-foreground">
+            Amount paid to Pixelforge
+        </p>
+    </article>
+
+    <article class="rounded-xl border border-sidebar-border/70 p-4 dark:border-sidebar-border">
+        <p class="text-sm text-muted-foreground">
+            Customer charges
+        </p>
+        <p class="mt-2 text-2xl font-semibold tabular-nums">
+            {{ formatUsd(billing.customer_charges_total) }}
+        </p>
+        <p class="mt-1 text-xs text-muted-foreground">
+            Total billed to customers
+        </p>
+    </article>
+
+    <article class="rounded-xl border border-sidebar-border/70 p-4 dark:border-sidebar-border">
+        <p class="text-sm text-muted-foreground">
+            Markup
+        </p>
+        <p class="mt-2 text-2xl font-semibold tabular-nums">
+            {{ formatUsd(billing.markup_total) }}
+        </p>
+        <p class="mt-1 text-xs text-muted-foreground">
+            Customer charges minus provider cost
+        </p>
+    </article>
+</section>
 
         <section
             class="flex flex-col gap-3 rounded-xl border border-sidebar-border/70 p-4 dark:border-sidebar-border sm:flex-row sm:items-center sm:justify-between"
