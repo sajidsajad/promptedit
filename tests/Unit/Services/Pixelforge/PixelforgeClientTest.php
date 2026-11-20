@@ -122,3 +122,88 @@ it('retrieves generation status with bearer authentication', function () {
             && $request->hasHeader('Authorization', 'Bearer test-api-key');
     });
 });
+
+it('retrieves provider usage with bearer authentication and date parameters', function () {
+    Http::fake([
+        'pixelforge.promptedit.dev/v1/usage*' => Http::response([
+            'object' => 'usage',
+            'start_date' => '2026-11-01',
+            'end_date' => '2026-11-02',
+            'data' => [
+                [
+                    'date' => '2026-11-01',
+                    'generations' => 3,
+                    'input_text_tokens' => 41,
+                    'input_image_tokens' => 0,
+                    'output_tokens' => 3300,
+                    'reasoning_tokens' => 2950,
+                    'cost_usd' => '0.169080000',
+                ],
+                [
+                    'date' => '2026-11-02',
+                    'generations' => 0,
+                    'input_text_tokens' => 0,
+                    'input_image_tokens' => 0,
+                    'output_tokens' => 0,
+                    'reasoning_tokens' => 0,
+                    'cost_usd' => '0.000000000',
+                ],
+            ],
+            'total' => [
+                'generations' => 3,
+                'input_text_tokens' => 41,
+                'input_image_tokens' => 0,
+                'output_tokens' => 3300,
+                'reasoning_tokens' => 2950,
+                'cost_usd' => '0.169080000',
+            ],
+        ], 200),
+    ]);
+
+    $result = app(PixelforgeClient::class)->getUsage(
+        '2026-11-01',
+        '2026-11-02'
+    );
+
+    expect($result['object'])->toBe('usage')
+        ->and($result['start_date'])->toBe('2026-11-01')
+        ->and($result['end_date'])->toBe('2026-11-02')
+        ->and($result['data'])->toHaveCount(2)
+        ->and($result['data'][0]['cost_usd'])->toBe('0.169080000')
+        ->and($result['data'][1]['generations'])->toBe(0)
+        ->and($result['data'][1]['cost_usd'])->toBe('0.000000000')
+        ->and($result['total']['cost_usd'])->toBe('0.169080000');
+
+    Http::assertSent(function ($request) {
+        parse_str(
+            parse_url($request->url(), PHP_URL_QUERY) ?? '',
+            $query
+        );
+
+        return $request->method() === 'GET'
+            && parse_url($request->url(), PHP_URL_PATH) === '/v1/usage'
+            && $request->hasHeader('Authorization', 'Bearer test-api-key')
+            && $query === [
+                'start_date' => '2026-11-01',
+                'end_date' => '2026-11-02',
+            ];
+    });
+});
+
+it('throws an exception when provider usage retrieval fails', function () {
+    Http::fake([
+        'pixelforge.promptedit.dev/v1/usage*' => Http::response([
+            'error' => [
+                'code' => 'invalid_api_key',
+                'message' => 'Invalid API key',
+            ],
+        ], 401),
+    ]);
+
+    expect(
+        fn () => app(PixelforgeClient::class)->getUsage(
+            '2026-11-01',
+            '2026-11-02'
+        )
+    )->toThrow(RequestException::class);
+});

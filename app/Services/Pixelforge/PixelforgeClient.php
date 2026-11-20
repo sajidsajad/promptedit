@@ -25,6 +25,30 @@ class PixelforgeClient
     }
 
     /**
+     * Retrieve account-level usage for an inclusive UTC date range.
+     */
+    public function getUsage(
+        string $startDate,
+        string $endDate
+    ): array {
+        $response = Http::baseUrl(
+            rtrim(config('services.pixelforge.base_url'), '/')
+        )
+            ->withToken(config('services.pixelforge.api_key'))
+            ->acceptJson()
+            ->connectTimeout(5)
+            ->timeout(15)
+            ->get('/usage', [
+                'start_date' => $startDate,
+                'end_date' => $endDate,
+            ]);
+
+        $response->throw();
+
+        return $response->json();
+    }
+
+    /**
      * Submit an asynchronous image generation request.
      */
     public function createGeneration(
