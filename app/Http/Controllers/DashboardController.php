@@ -26,7 +26,46 @@ class DashboardController extends Controller
             ? $requestedStatus
             : null;
 
-        // Always scope the query to the authenticated user.
+        // Calculate billing independently of the history status filter.
+        // Only successful generations are billable.
+        $billingTotals = Generation::query()
+            ->where('user_id', $request->user()->id)
+            ->where('status', 'succeeded')
+            ->selectRaw('
+                COUNT(*) as successful_generations,
+                COALESCE(SUM(provider_cost), 0) as provider_cost_total,
+                COALESCE(SUM(customer_price), 0) as customer_charges_total
+            ')
+            ->first();
+
+        // Keep monetary calculations at nine decimal places.
+        // BCMath avoids PHP floating-point arithmetic.
+        $providerCost = bcadd(
+            (string) $billingTotals->provider_cost_total,
+            '0',
+            9
+        );
+
+        $customerCharges = bcadd(
+            (string) $billingTotals->customer_charges_total,
+            '0',
+            9
+        );
+
+        $markup = bcsub(
+            $customerCharges,
+            $providerCost,
+            9
+        );
+
+        $billing = [
+            'successful_generations' => (int) $billingTotals->successful_generations,
+            'provider_cost_total' => $providerCost,
+            'customer_charges_total' => $customerCharges,
+            'markup_total' => $markup,
+        ];
+
+        // Always scope history to the authenticated user.
         $generations = Generation::query()
             ->where('user_id', $request->user()->id)
             ->when(
@@ -77,6 +116,7 @@ class DashboardController extends Controller
             'filters' => [
                 'status' => $status,
             ],
+            'billing' => $billing,
         ]);
     }
 }

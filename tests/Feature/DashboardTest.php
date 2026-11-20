@@ -1,4 +1,4 @@
-cat > tests/Feature/DashboardTest.php <<'PHP'
+
 <?php
 
 use App\Models\Generation;
@@ -24,6 +24,7 @@ test('authenticated users can visit the dashboard', function () {
         ->assertInertia(fn (Assert $page) => $page
             ->component('Dashboard')
             ->has('generations.data')
+            ->has('billing')
         );
 });
 
@@ -131,5 +132,100 @@ test('dashboard paginates generations with twenty records per page', function ()
         ->assertInertia(fn (Assert $page) => $page
             ->component('Dashboard')
             ->has('generations.data', 1)
+        );
+});
+
+test('billing summary includes only the authenticated users successful generations', function () {
+    $user = User::factory()->create();
+    $anotherUser = User::factory()->create();
+
+    foreach ([
+        [
+            'key' => 'successful-one',
+            'status' => 'succeeded',
+            'provider_cost' => '0.100000000',
+            'customer_price' => '0.125000000',
+        ],
+        [
+            'key' => 'successful-two',
+            'status' => 'succeeded',
+            'provider_cost' => '0.200000000',
+            'customer_price' => '0.250000000',
+        ],
+        [
+            'key' => 'failed-one',
+            'status' => 'failed',
+            'provider_cost' => '0.900000000',
+            'customer_price' => '1.125000000',
+        ],
+        [
+            'key' => 'queued-one',
+            'status' => 'queued',
+            'provider_cost' => '0.800000000',
+            'customer_price' => '1.000000000',
+        ],
+    ] as $record) {
+        Generation::create([
+            'user_id' => $user->id,
+            'idempotency_key' => $record['key'],
+            'prompt' => $record['key'],
+            'size' => '1024x1024',
+            'quality' => 'medium',
+            'status' => $record['status'],
+            'pricing_rates' => ['output_tokens' => '40.00'],
+            'provider_cost' => $record['provider_cost'],
+            'customer_price' => $record['customer_price'],
+        ]);
+    }
+
+    Generation::create([
+        'user_id' => $anotherUser->id,
+        'idempotency_key' => 'other-user-success',
+        'prompt' => 'Another users generation',
+        'size' => '1024x1024',
+        'quality' => 'medium',
+        'status' => 'succeeded',
+        'pricing_rates' => ['output_tokens' => '40.00'],
+        'provider_cost' => '5.000000000',
+        'customer_price' => '6.250000000',
+    ]);
+
+    $response = $this->actingAs($user)
+        ->get(route('dashboard', ['status' => 'failed']));
+
+    $response->assertOk()
+        ->assertInertia(fn (Assert $page) => $page
+            ->where('filters.status', 'failed')
+            ->where('billing.successful_generations', 2)
+            ->where('billing.provider_cost_total', '0.300000000')
+            ->where('billing.customer_charges_total', '0.375000000')
+            ->where('billing.markup_total', '0.075000000')
+        );
+});
+
+test('billing summary returns exact zero amounts when there are no successful generations', function () {
+    $user = User::factory()->create();
+
+    Generation::create([
+        'user_id' => $user->id,
+        'idempotency_key' => 'only-failed-generation',
+        'prompt' => 'A failed generation',
+        'size' => '1024x1024',
+        'quality' => 'medium',
+        'status' => 'failed',
+        'pricing_rates' => ['output_tokens' => '40.00'],
+        'provider_cost' => '0.000000000',
+        'customer_price' => '0.000000000',
+    ]);
+
+    $response = $this->actingAs($user)
+        ->get(route('dashboard'));
+
+    $response->assertOk()
+        ->assertInertia(fn (Assert $page) => $page
+            ->where('billing.successful_generations', 0)
+            ->where('billing.provider_cost_total', '0.000000000')
+            ->where('billing.customer_charges_total', '0.000000000')
+            ->where('billing.markup_total', '0.000000000')
         );
 });
