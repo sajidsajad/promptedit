@@ -1,0 +1,82 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\Generation;
+use Illuminate\Http\Request;
+use Inertia\Inertia;
+use Inertia\Response;
+
+class DashboardController extends Controller
+{
+    public function index(Request $request): Response
+    {
+        // Only allow statuses supported by the generation lifecycle.
+        $allowedStatuses = [
+            'queued',
+            'processing',
+            'succeeded',
+            'failed',
+        ];
+
+        $requestedStatus = $request->query('status');
+
+        // Ignore unsupported status filters.
+        $status = in_array($requestedStatus, $allowedStatuses, true)
+            ? $requestedStatus
+            : null;
+
+        // Always scope the query to the authenticated user.
+        $generations = Generation::query()
+            ->where('user_id', $request->user()->id)
+            ->when(
+                $status,
+                fn ($query) => $query->where('status', $status)
+            )
+            // Use ID as a tie-breaker when timestamps are identical.
+            ->orderByDesc('created_at')
+            ->orderByDesc('id')
+            // Only expose fields needed by the dashboard.
+            ->select([
+                'id',
+                'prompt',
+                'size',
+                'quality',
+                'status',
+                'provider_cost',
+                'customer_price',
+                'image_url',
+                'image_url_expires_at',
+                'error_code',
+                'error_message',
+                'started_at',
+                'completed_at',
+                'created_at',
+            ])
+            ->paginate(20)
+            ->withQueryString()
+            ->through(fn (Generation $generation) => [
+                'id' => $generation->id,
+                'prompt' => $generation->prompt,
+                'size' => $generation->size,
+                'quality' => $generation->quality,
+                'status' => $generation->status,
+                'provider_cost' => $generation->provider_cost,
+                'customer_price' => $generation->customer_price,
+                'image_url' => $generation->image_url,
+                'image_url_expires_at' => $generation->image_url_expires_at?->toISOString(),
+                'error_code' => $generation->error_code,
+                'error_message' => $generation->error_message,
+                'started_at' => $generation->started_at?->toISOString(),
+                'completed_at' => $generation->completed_at?->toISOString(),
+                'created_at' => $generation->created_at?->toISOString(),
+            ]);
+
+        return Inertia::render('Dashboard', [
+            'generations' => $generations,
+            'filters' => [
+                'status' => $status,
+            ],
+        ]);
+    }
+}
