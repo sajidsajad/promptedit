@@ -7,12 +7,18 @@ use App\Http\Requests\StoreGenerationRequest;
 use App\Jobs\SubmitGeneration;
 use App\Models\Generation;
 use App\Services\Generations\GenerationCreationService;
+use App\Services\Generations\GenerationProviderService;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
+use UnexpectedValueException;
 
 class GenerationController extends Controller
 {
+    /**
+     * Create a generation for the authenticated user.
+     */
     public function store(
         StoreGenerationRequest $request,
         GenerationCreationService $service
@@ -58,14 +64,30 @@ class GenerationController extends Controller
 
     /**
      * Return the status and display information for an owned generation.
+     *
+     * If the generation succeeded and its signed image URL has expired,
+     * attempt to refresh that URL without changing billing or lifecycle data.
      */
-    public function show(Request $request, int $generation): JsonResponse
-    {
+    public function show(
+        Request $request,
+        int $generation,
+        GenerationProviderService $providerService
+    ): JsonResponse {
         // Scope the lookup to the authenticated user.
-        // A generation belonging to another user will return 404.
+        // A generation belonging to another user returns 404.
         $record = Generation::query()
             ->where('user_id', $request->user()->id)
             ->findOrFail($generation);
+
+        try {
+            $record = $providerService->refreshImageUrl($record);
+        } catch (RequestException | UnexpectedValueException $exception) {
+            // Image refresh is auxiliary. A provider failure must not make
+            // the generation status endpoint unavailable.
+            report($exception);
+
+            $record->refresh();
+        }
 
         return response()->json([
             'data' => [

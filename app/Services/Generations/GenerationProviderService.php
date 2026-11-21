@@ -6,6 +6,7 @@ use App\Jobs\ProcessPixelforgeWebhook;
 use App\Models\Generation;
 use App\Models\WebhookEvent;
 use App\Services\Pixelforge\PixelforgeClient;
+use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
 use UnexpectedValueException;
 
@@ -110,7 +111,7 @@ class GenerationProviderService
                 );
             }
 
-            // Only associate the provider ID here.
+            // Only associate the provider ID.
             // Do not overwrite the local status: a webhook may already
             // have advanced it beyond queued.
             $localGeneration->pixelforge_id = $providerId;
@@ -159,6 +160,139 @@ class GenerationProviderService
     }
 
     /**
+     * Refresh an expired or missing Pixelforge image URL.
+     *
+     * This method changes only:
+     * - image_url
+     * - image_url_expires_at
+     *
+     * It never changes generation status, usage, pricing rates,
+     * provider cost, customer price, or completion timestamps.
+     */
+    public function refreshImageUrl(Generation $generation): Generation
+    {
+        $generation->refresh();
+
+        // Only successful generations can have an image.
+        if (
+            $generation->status !== 'succeeded'
+            || empty($generation->pixelforge_id)
+        ) {
+            return $generation;
+        }
+
+        // Do not make an API request if the current URL is still valid.
+        if (
+            ! empty($generation->image_url)
+            && $generation->image_url_expires_at !== null
+            && $generation->image_url_expires_at->isFuture()
+        ) {
+            return $generation;
+        }
+
+        // Fetch the latest provider snapshot.
+        // The provider API returns the generation fields at the top level.
+        $snapshot = $this->pixelforge->getGeneration(
+            $generation->pixelforge_id
+        );
+
+        // Ensure the provider returned the generation we requested.
+        if (($snapshot['id'] ?? null) !== $generation->pixelforge_id) {
+            throw new UnexpectedValueException(
+                'Pixelforge returned a different generation ID.'
+            );
+        }
+
+        // The provider must still consider this generation successful.
+        if (($snapshot['status'] ?? null) !== 'succeeded') {
+            throw new UnexpectedValueException(
+                'Pixelforge generation is not in succeeded state.'
+            );
+        }
+
+        $imageUrl = $snapshot['image_url'] ?? null;
+        $expiresAt = $snapshot['image_url_expires_at'] ?? null;
+
+        // Validate the refreshed URL.
+        if (
+            ! is_string($imageUrl)
+            || filter_var($imageUrl, FILTER_VALIDATE_URL) === false
+        ) {
+            throw new UnexpectedValueException(
+                'Pixelforge returned an invalid image URL.'
+            );
+        }
+
+        $scheme = parse_url($imageUrl, PHP_URL_SCHEME);
+
+        if (! in_array($scheme, ['http', 'https'], true)) {
+            throw new UnexpectedValueException(
+                'Pixelforge image URL must use HTTP or HTTPS.'
+            );
+        }
+
+        // Validate the expiry timestamp.
+        if (! is_string($expiresAt) || trim($expiresAt) === '') {
+            throw new UnexpectedValueException(
+                'Pixelforge did not return an image URL expiry timestamp.'
+            );
+        }
+
+        try {
+            $parsedExpiry = CarbonImmutable::parse($expiresAt);
+        } catch (\Throwable $exception) {
+            throw new UnexpectedValueException(
+                'Pixelforge returned an invalid image URL expiry timestamp.',
+                previous: $exception
+            );
+        }
+
+        if (! $parsedExpiry->isFuture()) {
+            throw new UnexpectedValueException(
+                'Pixelforge returned an already expired image URL.'
+            );
+        }
+
+        // Lock the local row before saving. The provider request happens
+        // outside the transaction to avoid holding a database lock during
+        // network activity.
+        return DB::transaction(function () use (
+            $generation,
+            $imageUrl,
+            $parsedExpiry
+        ): Generation {
+            $localGeneration = Generation::query()
+                ->lockForUpdate()
+                ->findOrFail($generation->id);
+
+            // The generation may have changed while the provider request
+            // was running. Do not overwrite a different association/state.
+            if (
+                $localGeneration->status !== 'succeeded'
+                || $localGeneration->pixelforge_id !== $generation->pixelforge_id
+            ) {
+                return $localGeneration;
+            }
+
+            // Another request may already have refreshed the URL.
+            if (
+                ! empty($localGeneration->image_url)
+                && $localGeneration->image_url_expires_at !== null
+                && $localGeneration->image_url_expires_at->isFuture()
+            ) {
+                return $localGeneration;
+            }
+
+            // Update image access only. Billing and lifecycle data remain intact.
+            $localGeneration->image_url = $imageUrl;
+            $localGeneration->image_url_expires_at = $parsedExpiry;
+            $localGeneration->save();
+
+            return $localGeneration;
+        });
+    }
+
+    /**
      * Validate the four provider rates before saving the snapshot.
      */
     private function validatePricingRates(mixed $rates): array
@@ -195,3 +329,4 @@ class GenerationProviderService
         );
     }
 }
+

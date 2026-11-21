@@ -1,7 +1,7 @@
 
 <script setup lang="ts">
 import { Head, Link, router } from '@inertiajs/vue3';
-import { ref, watch } from 'vue';
+import { onMounted, onUnmounted, ref, watch } from 'vue';
 import { dashboard } from '@/routes';
 
 type GenerationStatus =
@@ -65,6 +65,24 @@ const props = defineProps<Props>();
 
 const selectedStatus = ref(props.filters.status ?? '');
 
+
+const prompt = ref('');
+const selectedSize = ref('1024x1024');
+const selectedQuality = ref('medium');
+const referenceImagesText = ref('');
+
+const isSubmitting = ref(false);
+const formError = ref('');
+const validationErrors = ref<Record<string, string[]>>({});
+
+const successMessage = ref('');
+
+// Retain the same key if a network failure makes the result uncertain.
+// Reuse it only when retrying the exact same payload.
+let pendingIdempotencyKey: string | null = null;
+let pendingPayloadSignature: string | null = null;
+
+
 watch(
     () => props.filters.status,
     (status) => {
@@ -105,6 +123,105 @@ function applyFilter() {
     );
 }
 
+
+function getXsrfToken(): string {
+    const cookie = document.cookie
+        .split('; ')
+        .find((item) => item.startsWith('XSRF-TOKEN='));
+
+    if (!cookie) {
+        throw new Error(
+            'CSRF token is missing. Refresh the page and try again.',
+        );
+    }
+
+    return decodeURIComponent(cookie.substring('XSRF-TOKEN='.length));
+}
+
+async function submitGeneration() {
+    formError.value = '';
+    successMessage.value = '';
+    validationErrors.value = {};
+
+    const referenceImages = referenceImagesText.value
+        .split('\n')
+        .map((url) => url.trim())
+        .filter((url) => url.length > 0);
+
+    const payload = {
+        prompt: prompt.value.trim(),
+        size: selectedSize.value,
+        quality: selectedQuality.value,
+        reference_images: referenceImages,
+    };
+
+    const payloadSignature = JSON.stringify(payload);
+
+    if (
+        !pendingIdempotencyKey ||
+        pendingPayloadSignature !== payloadSignature
+    ) {
+        pendingIdempotencyKey = crypto.randomUUID();
+        pendingPayloadSignature = payloadSignature;
+    }
+
+    isSubmitting.value = true;
+
+    try {
+        const response = await fetch('/generations', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+                Accept: 'application/json',
+                'Content-Type': 'application/json',
+                'X-XSRF-TOKEN': getXsrfToken(),
+                'Idempotency-Key': pendingIdempotencyKey,
+            },
+            body: JSON.stringify(payload),
+        });
+
+        const result = await response.json();
+
+        // The server responded, so this request's outcome is known.
+        pendingIdempotencyKey = null;
+        pendingPayloadSignature = null;
+
+        if (response.status === 422) {
+            validationErrors.value = result.errors ?? {};
+            formError.value =
+                result.message ?? 'Please correct the highlighted fields.';
+            return;
+        }
+
+        if (!response.ok) {
+            formError.value =
+                result.message ?? 'Unable to create the generation.';
+            return;
+        }
+
+        prompt.value = '';
+        referenceImagesText.value = '';
+
+        successMessage.value =
+            `Generation #${result.data.id} has been queued.`;
+
+        // Reload the dashboard data without navigating away.
+        router.reload({
+            only: ['generations', 'billing'],
+        });
+    } catch (error) {
+        // Keep the key if the network failed. The server may have
+        // accepted the request even though the response was lost.
+        formError.value =
+            error instanceof Error
+                ? error.message
+                : 'A network error occurred. Please try again.';
+    } finally {
+        isSubmitting.value = false;
+    }
+}
+
+
 function statusClasses(status: GenerationStatus): string {
     const classes: Record<GenerationStatus, string> = {
         queued:
@@ -141,12 +258,312 @@ function formatUsd(amount: string): string {
     // Keep the exact decimal string; do not use floating-point arithmetic.
     return `$${amount}`;
 }
+
+
+let pollingTimer: ReturnType<typeof setInterval> | undefined;
+let isPolling = false;
+
+/**
+ * Check active generations against the backend.
+ *
+ * The backend obtains the current status from our database,
+ * which is updated by webhooks and reconciliation jobs.
+ */
+async function pollActiveGenerations(): Promise<void> {
+    if (isPolling) {
+        return;
+    }
+
+    const activeGenerations = props.generations.data.filter(
+        (generation) =>
+            generation.status === 'queued' ||
+            generation.status === 'processing',
+    );
+
+    if (activeGenerations.length === 0) {
+        return;
+    }
+
+    isPolling = true;
+
+    try {
+        const statusChanges = await Promise.all(
+            activeGenerations.map(async (generation) => {
+                try {
+                    const response = await fetch(
+                        `/generations/${generation.id}`,
+                        {
+                            method: 'GET',
+                            credentials: 'same-origin',
+                            headers: {
+                                Accept: 'application/json',
+                            },
+                            cache: 'no-store',
+                        },
+                    );
+
+                    if (!response.ok) {
+                        return false;
+                    }
+
+                    const result = await response.json();
+
+                    return result.data?.status !== generation.status;
+                } catch {
+                    // A temporary network error should not stop
+                    // polling other generations.
+                    return false;
+                }
+            }),
+        );
+
+        if (statusChanges.some(Boolean)) {
+            router.reload({
+                only: ['generations', 'billing'],
+            });
+        }
+    } finally {
+        isPolling = false;
+    }
+}
+
+/**
+ * Ask the backend to refresh successful generations whose signed image URL
+ * is missing or expired. The backend validates the provider response and
+ * updates only the image URL fields; billing and generation state stay intact.
+ */
+let isRefreshingImages = false;
+
+async function refreshExpiredImages(): Promise<void> {
+    if (isRefreshingImages) {
+        return;
+    }
+
+    const expiredGenerations = props.generations.data.filter((generation) => {
+        if (generation.status !== 'succeeded') {
+            return false;
+        }
+
+        if (!generation.image_url || !generation.image_url_expires_at) {
+            return true;
+        }
+
+        const expiresAt = new Date(generation.image_url_expires_at).getTime();
+
+        return !Number.isFinite(expiresAt) || expiresAt <= Date.now();
+    });
+
+    if (expiredGenerations.length === 0) {
+        return;
+    }
+
+    isRefreshingImages = true;
+
+    try {
+        const refreshedImages = await Promise.all(
+            expiredGenerations.map(async (generation) => {
+                try {
+                    const response = await fetch(
+                        `/generations/${generation.id}`,
+                        {
+                            method: 'GET',
+                            credentials: 'same-origin',
+                            headers: {
+                                Accept: 'application/json',
+                            },
+                            cache: 'no-store',
+                        },
+                    );
+
+                    if (!response.ok) {
+                        return false;
+                    }
+
+                    const result = await response.json();
+                    const imageUrl = result.data?.image_url;
+                    const expiresAt = result.data?.image_url_expires_at;
+
+                    if (
+                        typeof imageUrl !== 'string' ||
+                        imageUrl.length === 0 ||
+                        typeof expiresAt !== 'string'
+                    ) {
+                        return false;
+                    }
+
+                    const expiryTimestamp = new Date(expiresAt).getTime();
+
+                    return (
+                        Number.isFinite(expiryTimestamp) &&
+                        expiryTimestamp > Date.now()
+                    );
+                } catch {
+                    // A temporary network/provider error can be retried
+                    // on the next dashboard polling interval.
+                    return false;
+                }
+            }),
+        );
+
+        if (refreshedImages.some(Boolean)) {
+            router.reload({
+                only: ['generations'],
+            });
+        }
+    } finally {
+        isRefreshingImages = false;
+    }
+}
+
+onMounted(() => {
+    // Check immediately, then every three seconds.
+    void pollActiveGenerations();
+    void refreshExpiredImages();
+
+    pollingTimer = setInterval(() => {
+        void pollActiveGenerations();
+        void refreshExpiredImages();
+    }, 3000);
+});
+
+onUnmounted(() => {
+    if (pollingTimer !== undefined) {
+        clearInterval(pollingTimer);
+    }
+});
+
 </script>
 
 <template>
     <Head title="Generation History" />
 
     <main class="flex flex-1 flex-col gap-6 p-4 md:p-6">
+
+<section class="rounded-xl border border-sidebar-border/70 p-4 dark:border-sidebar-border md:p-6">
+    <div class="mb-5">
+        <h2 class="text-lg font-semibold">Create an image</h2>
+        <p class="text-sm text-muted-foreground">
+            Describe your idea and let Pixelforge bring it to life.
+        </p>
+    </div>
+
+    <form class="flex flex-col gap-4" @submit.prevent="submitGeneration">
+        <div class="flex flex-col gap-2">
+            <label for="generation-prompt" class="text-sm font-medium">
+                Image prompt
+            </label>
+
+            <textarea
+                id="generation-prompt"
+                v-model="prompt"
+                required
+                maxlength="4000"
+                rows="4"
+                placeholder="A cinematic mountain landscape at golden hour..."
+                class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+            />
+
+            <p class="text-xs text-muted-foreground">
+                {{ prompt.length }} / 4000 characters
+            </p>
+
+            <p
+                v-for="message in validationErrors.prompt ?? []"
+                :key="message"
+                class="text-sm text-red-600"
+            >
+                {{ message }}
+            </p>
+        </div>
+
+        <div class="grid gap-4 sm:grid-cols-2">
+            <div class="flex flex-col gap-2">
+                <label for="generation-size" class="text-sm font-medium">
+                    Image size
+                </label>
+
+                <select
+                    id="generation-size"
+                    v-model="selectedSize"
+                    class="rounded-md border border-input bg-background px-3 py-2 text-sm"
+                >
+                    <option value="1024x1024">1024 × 1024 — Square</option>
+                    <option value="1536x1024">1536 × 1024 — Landscape</option>
+                    <option value="1024x1536">1024 × 1536 — Portrait</option>
+                </select>
+            </div>
+
+            <div class="flex flex-col gap-2">
+                <label for="generation-quality" class="text-sm font-medium">
+                    Quality
+                </label>
+
+                <select
+                    id="generation-quality"
+                    v-model="selectedQuality"
+                    class="rounded-md border border-input bg-background px-3 py-2 text-sm"
+                >
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="flex flex-col gap-2">
+            <label for="reference-images" class="text-sm font-medium">
+                Reference image URLs (optional)
+            </label>
+
+            <textarea
+                id="reference-images"
+                v-model="referenceImagesText"
+                rows="2"
+                placeholder="Enter one HTTP or HTTPS image URL per line"
+                class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+            />
+
+            <p class="text-xs text-muted-foreground">
+                Maximum 4 reference images.
+            </p>
+
+            <p
+                v-for="message in validationErrors.reference_images ?? []"
+                :key="message"
+                class="text-sm text-red-600"
+            >
+                {{ message }}
+            </p>
+        </div>
+
+        <p
+            v-if="formError"
+            role="alert"
+            class="rounded-md bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950 dark:text-red-300"
+        >
+            {{ formError }}
+        </p>
+
+        <p
+            v-if="successMessage"
+            role="status"
+            class="rounded-md bg-green-50 p-3 text-sm text-green-700 dark:bg-green-950 dark:text-green-300"
+        >
+            {{ successMessage }}
+        </p>
+
+        <div class="flex justify-end">
+            <button
+                type="submit"
+                :disabled="isSubmitting || !prompt.trim()"
+                class="rounded-md bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
+            >
+                {{ isSubmitting ? 'Submitting...' : 'Generate image' }}
+            </button>
+        </div>
+    </form>
+</section>
+
         <section class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div>
                 <h1 class="text-2xl font-semibold tracking-tight">
