@@ -13,6 +13,9 @@ Route::middleware(['auth', 'verified'])->group(function () {
 
     Route::post('/generations', [GenerationController::class, 'store'])
         ->name('generations.store');
+
+Route::get('/generations/{generation}', [GenerationController::class, 'show'])
+    ->name('generations.show');
 });
 
 Route::post('/webhooks/pixelforge', PixelforgeWebhookController::class)
