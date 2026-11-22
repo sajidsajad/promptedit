@@ -5,8 +5,9 @@ use App\Models\User;
 use App\Services\Pixelforge\PixelforgeUsageReconciliationService;
 use App\Services\Pixelforge\PixelforgeUsageService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
 
-uses(Tests\TestCase::class, RefreshDatabase::class);
+uses(TestCase::class, RefreshDatabase::class);
 
 beforeEach(function () {
     $this->user = User::factory()->create();
@@ -21,9 +22,9 @@ function createReconciliationGeneration(
 ): Generation {
     return Generation::create([
         'user_id' => $user->id,
-        'pixelforge_id' => 'gen_' . uniqid(),
-        'idempotency_key' => 'key_' . uniqid(),
-        'provider_idempotency_key' => 'provider_' . uniqid(),
+        'pixelforge_id' => 'gen_'.uniqid(),
+        'idempotency_key' => 'key_'.uniqid(),
+        'provider_idempotency_key' => 'provider_'.uniqid(),
         'prompt' => 'Test generation',
         'size' => '1024x1024',
         'quality' => 'medium',
@@ -260,7 +261,6 @@ it('does not modify local billing records during reconciliation', function () {
         ->and($generation->provider_cost)->toBe($originalProviderCost);
 });
 
-
 it('detects local usage missing from the provider report', function () {
     createReconciliationGeneration(
         $this->user,
@@ -333,7 +333,6 @@ it('groups local generations by their UTC completion date', function () {
         ->toBe(0);
 });
 
-
 it('rejects an invalid provider usage date', function () {
     $this->mock(PixelforgeUsageService::class)
         ->shouldReceive('getUsage')
@@ -352,7 +351,7 @@ it('rejects an invalid provider usage date', function () {
 
     app(PixelforgeUsageReconciliationService::class)
         ->reconcile('2026-11-01', '2026-11-03');
-})->throws(\InvalidArgumentException::class);
+})->throws(InvalidArgumentException::class);
 
 it('rejects an invalid provider cost', function () {
     $this->mock(PixelforgeUsageService::class)
@@ -372,7 +371,7 @@ it('rejects an invalid provider cost', function () {
 
     app(PixelforgeUsageReconciliationService::class)
         ->reconcile('2026-11-01', '2026-11-03');
-})->throws(\InvalidArgumentException::class);
+})->throws(InvalidArgumentException::class);
 
 it('rejects negative provider token counts', function () {
     $this->mock(PixelforgeUsageService::class)
@@ -392,4 +391,4 @@ it('rejects negative provider token counts', function () {
 
     app(PixelforgeUsageReconciliationService::class)
         ->reconcile('2026-11-01', '2026-11-03');
-})->throws(\InvalidArgumentException::class);
+})->throws(InvalidArgumentException::class);

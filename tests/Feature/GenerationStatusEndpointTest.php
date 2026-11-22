@@ -12,9 +12,9 @@ function makeGenerationForStatusTest(
 ): Generation {
     return Generation::create([
         'user_id' => $user->id,
-        'pixelforge_id' => 'gen_' . uniqid(),
-        'idempotency_key' => 'request_' . uniqid(),
-        'provider_idempotency_key' => 'provider_' . uniqid(),
+        'pixelforge_id' => 'gen_'.uniqid(),
+        'idempotency_key' => 'request_'.uniqid(),
+        'provider_idempotency_key' => 'provider_'.uniqid(),
         'request_hash' => hash('sha256', uniqid()),
         'prompt' => 'A cinematic mountain landscape',
         'size' => '1024x1024',

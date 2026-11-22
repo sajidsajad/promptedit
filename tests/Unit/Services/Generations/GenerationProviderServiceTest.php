@@ -5,6 +5,7 @@ use App\Models\Generation;
 use App\Models\User;
 use App\Models\WebhookEvent;
 use App\Services\Generations\GenerationProviderService;
+use App\Services\Generations\GenerationReservationCalculator;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Http;
@@ -20,9 +21,20 @@ beforeEach(function () {
     ]);
 });
 
+/**
+ * Create a queued generation with a funded wallet.
+ *
+ * User creation automatically provisions the wallet, so we update
+ * that existing wallet instead of creating a duplicate.
+ */
 function createQueuedGeneration(array $overrides = []): Generation
 {
     $user = User::factory()->create();
+
+    $user->wallet()->update([
+        'balance' => '10.000000000',
+        'reserved_balance' => '0.000000000',
+    ]);
 
     return Generation::create(array_merge([
         'user_id' => $user->id,
@@ -36,22 +48,57 @@ function createQueuedGeneration(array $overrides = []): Generation
         'reference_images' => [],
         'metadata' => [],
         'pricing_rates' => [],
+        'pricing_tokens' => [],
         'provider_cost' => '0.000000000',
         'customer_price' => '0.000000000',
     ], $overrides));
 }
 
+/**
+ * Representative Pixelforge pricing response.
+ */
 function pixelforgePricingResponse(): array
 {
     return [
         'object' => 'pricing',
         'currency' => 'usd',
         'unit' => 'per_1m_tokens',
+
         'rates' => [
             'input_text_tokens' => '5.00',
             'input_image_tokens' => '10.00',
             'output_tokens' => '40.00',
             'reasoning_tokens' => '12.50',
+        ],
+
+        'tokens' => [
+            'characters_per_text_token' => 4,
+            'text_token_variance' => 0.15,
+            'per_reference_image' => 765,
+
+            'output' => [
+                'low' => [
+                    '1024x1024' => 280,
+                    '1536x1024' => 420,
+                    '1024x1536' => 420,
+                ],
+                'medium' => [
+                    '1024x1024' => 1100,
+                    '1536x1024' => 1650,
+                    '1024x1536' => 1650,
+                ],
+                'high' => [
+                    '1024x1024' => 4300,
+                    '1536x1024' => 6450,
+                    '1024x1536' => 6450,
+                ],
+            ],
+
+            'reasoning' => [
+                'low' => ['min' => 0, 'max' => 500],
+                'medium' => ['min' => 200, 'max' => 2000],
+                'high' => ['min' => 1000, 'max' => 8000],
+            ],
         ],
     ];
 }
@@ -78,10 +125,29 @@ it('snapshots pricing and submits a generation to Pixelforge', function () {
 
     $result->refresh();
 
+    $expectedReservation = app(
+        GenerationReservationCalculator::class
+    )->calculate(
+        $result->prompt,
+        $result->size,
+        $result->quality,
+        count($result->reference_images ?? []),
+        $result->pricing_rates,
+        $result->pricing_tokens
+    );
+
+    $wallet = $result->user->wallet()->first();
+
+    expect($wallet)->not->toBeNull()
+        ->and($wallet->reserved_balance)->toBe($expectedReservation);
+
     expect($result->pixelforge_id)->toBe('gen_test123')
         ->and($result->status)->toBe('queued')
         ->and($result->pricing_rates)->toBe(
             pixelforgePricingResponse()['rates']
+        )
+        ->and($result->pricing_tokens)->toBe(
+            pixelforgePricingResponse()['tokens']
         );
 
     Http::assertSent(function ($request) {
@@ -122,7 +188,8 @@ it('does not submit a generation when pricing retrieval fails', function () {
 
     expect($generation->pixelforge_id)->toBeNull()
         ->and($generation->status)->toBe('queued')
-        ->and($generation->pricing_rates)->toBe([]);
+        ->and($generation->pricing_rates)->toBe([])
+        ->and($generation->pricing_tokens)->toBe([]);
 
     Http::assertNotSent(
         fn ($request) => $request->method() === 'POST'
@@ -153,7 +220,11 @@ it('keeps the pricing snapshot when generation submission fails', function () {
 
     expect($generation->pricing_rates)->toBe(
         pixelforgePricingResponse()['rates']
-    )->and($generation->pixelforge_id)->toBeNull()
+    )
+        ->and($generation->pricing_tokens)->toBe(
+            pixelforgePricingResponse()['tokens']
+        )
+        ->and($generation->pixelforge_id)->toBeNull()
         ->and($generation->status)->toBe('queued');
 });
 
@@ -165,6 +236,8 @@ it('reuses the existing pricing snapshot when retrying submission', function () 
         'reasoning_tokens' => '11.50',
     ];
 
+    $originalTokens = pixelforgePricingResponse()['tokens'];
+
     Http::fake([
         'pixelforge.promptedit.dev/v1/generations' => Http::response([
             'id' => 'gen_retry123',
@@ -175,6 +248,7 @@ it('reuses the existing pricing snapshot when retrying submission', function () 
 
     $generation = createQueuedGeneration([
         'pricing_rates' => $originalRates,
+        'pricing_tokens' => $originalTokens,
     ]);
 
     $result = app(GenerationProviderService::class)->submit($generation);
@@ -182,7 +256,8 @@ it('reuses the existing pricing snapshot when retrying submission', function () 
     $result->refresh();
 
     expect($result->pixelforge_id)->toBe('gen_retry123')
-        ->and($result->pricing_rates)->toBe($originalRates);
+        ->and($result->pricing_rates)->toBe($originalRates)
+        ->and($result->pricing_tokens)->toBe($originalTokens);
 
     Http::assertNotSent(
         fn ($request) => $request->url() ===
@@ -195,6 +270,7 @@ it('redispatches an early webhook after associating the provider generation ID',
 
     $generation = createQueuedGeneration([
         'pricing_rates' => pixelforgePricingResponse()['rates'],
+        'pricing_tokens' => pixelforgePricingResponse()['tokens'],
     ]);
 
     $event = WebhookEvent::create([
@@ -251,6 +327,7 @@ it('rejects an unexpected succeeded status in a generation creation response', f
 
     $generation = createQueuedGeneration([
         'pricing_rates' => pixelforgePricingResponse()['rates'],
+        'pricing_tokens' => pixelforgePricingResponse()['tokens'],
     ]);
 
     expect(
@@ -275,6 +352,7 @@ it('does not regress an already processing generation when the provider responds
     $generation = createQueuedGeneration([
         'status' => 'processing',
         'pricing_rates' => pixelforgePricingResponse()['rates'],
+        'pricing_tokens' => pixelforgePricingResponse()['tokens'],
         'started_at' => now()->subMinute(),
     ]);
 
@@ -285,4 +363,48 @@ it('does not regress an already processing generation when the provider responds
     expect($result->pixelforge_id)->toBe('gen_already_processing_001')
         ->and($result->status)->toBe('processing')
         ->and($result->started_at)->not->toBeNull();
+});
+
+it('does not submit a generation when token pricing is invalid', function () {
+    $pricing = pixelforgePricingResponse();
+
+    unset($pricing['tokens']['output']['high']['1536x1024']);
+
+    Http::fake([
+        'pixelforge.promptedit.dev/v1/pricing' => Http::response(
+            $pricing,
+            200
+        ),
+    ]);
+
+    $generation = createQueuedGeneration();
+
+    expect(
+        fn () => app(GenerationProviderService::class)->submit($generation)
+    )->toThrow(UnexpectedValueException::class);
+
+    $generation->refresh();
+
+    expect($generation->pricing_rates)->toBe([])
+        ->and($generation->pricing_tokens)->toBe([])
+        ->and($generation->pixelforge_id)->toBeNull();
+
+    Http::assertNotSent(
+        fn ($request) => $request->method() === 'POST'
+    );
+});
+
+it('rejects an incomplete existing pricing snapshot without provider requests', function () {
+    $generation = createQueuedGeneration([
+        'pricing_rates' => pixelforgePricingResponse()['rates'],
+        'pricing_tokens' => [],
+    ]);
+
+    Http::fake();
+
+    expect(
+        fn () => app(GenerationProviderService::class)->submit($generation)
+    )->toThrow(UnexpectedValueException::class);
+
+    Http::assertNothingSent();
 });

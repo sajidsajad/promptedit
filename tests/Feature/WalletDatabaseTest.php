@@ -23,10 +23,18 @@ it('does not allow mass assignment to promote a user to admin', function () {
     expect($user->is_admin)->toBeFalse();
 });
 
+it('automatically creates a zero-balance wallet for a new user', function () {
+    $user = User::factory()->create();
+
+    expect($user->wallet)->not->toBeNull()
+        ->and($user->wallet->balance)->toBe('0.000000000')
+        ->and($user->wallet->reserved_balance)->toBe('0.000000000');
+});
+
 it('allows each user to have one wallet', function () {
     $user = User::factory()->create();
 
-    $wallet = $user->wallet()->create();
+    $wallet = $user->wallet()->firstOrFail();
 
     expect($user->fresh()->wallet->is($wallet))->toBeTrue()
         ->and($wallet->balance)->toBe('0.000000000')
@@ -36,7 +44,9 @@ it('allows each user to have one wallet', function () {
 it('preserves nine decimal places in wallet balances', function () {
     $user = User::factory()->create();
 
-    $wallet = $user->wallet()->create([
+    $wallet = $user->wallet()->firstOrFail();
+
+    $wallet->update([
         'balance' => '12.345678901',
         'reserved_balance' => '1.234567890',
     ]);
@@ -50,7 +60,9 @@ it('preserves nine decimal places in wallet balances', function () {
 it('records wallet transactions with balance snapshots', function () {
     $user = User::factory()->create();
 
-    $wallet = $user->wallet()->create([
+    $wallet = $user->wallet()->firstOrFail();
+
+    $wallet->update([
         'balance' => '10.000000000',
         'reserved_balance' => '2.000000000',
     ]);
@@ -73,7 +85,8 @@ it('records wallet transactions with balance snapshots', function () {
 
 it('rejects duplicate wallet transaction references', function () {
     $user = User::factory()->create();
-    $wallet = $user->wallet()->create();
+
+    $wallet = $user->wallet()->firstOrFail();
 
     $attributes = [
         'type' => 'credit',
@@ -92,8 +105,6 @@ it('rejects duplicate wallet transaction references', function () {
 
 it('prevents a user from having multiple wallets', function () {
     $user = User::factory()->create();
-
-    $user->wallet()->create();
 
     expect(fn () => Wallet::create([
         'user_id' => $user->id,

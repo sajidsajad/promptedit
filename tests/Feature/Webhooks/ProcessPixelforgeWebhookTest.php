@@ -3,10 +3,38 @@
 use App\Jobs\ProcessPixelforgeWebhook;
 use App\Models\Generation;
 use App\Models\User;
+use App\Models\Wallet;
 use App\Models\WebhookEvent;
+use App\Services\Wallet\WalletReservationService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
+
+/**
+ * Give a processing generation a wallet reservation.
+ *
+ * This simulates the reservation created before a generation
+ * is submitted to Pixelforge.
+ */
+function reserveWebhookTestGeneration(Generation $generation): void
+{
+    $wallet = Wallet::firstOrCreate(
+        ['user_id' => $generation->user_id],
+        [
+            'balance' => '0.000000000',
+            'reserved_balance' => '0.000000000',
+        ]
+    );
+
+    $wallet->update([
+        'balance' => '10.000000000',
+    ]);
+
+    app(WalletReservationService::class)->reserve(
+        $generation,
+        '1.000000000'
+    );
+}
 
 it('processes a successful generation webhook and calculates exact billing', function () {
     $user = User::factory()->create();
@@ -30,6 +58,8 @@ it('processes a successful generation webhook and calculates exact billing', fun
         'provider_cost' => '0.000000000',
         'customer_price' => '0.000000000',
     ]);
+
+    reserveWebhookTestGeneration($generation);
 
     $payload = [
         'id' => 'evt_test_success_001',
@@ -107,6 +137,8 @@ it('processes a failed generation without charging the user', function () {
         'provider_cost' => '0.000000000',
         'customer_price' => '0.000000000',
     ]);
+
+    reserveWebhookTestGeneration($generation);
 
     $payload = [
         'id' => 'evt_test_failed_001',

@@ -7,6 +7,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
+
 uses(TestCase::class, RefreshDatabase::class);
 
 beforeEach(function () {
@@ -23,9 +24,9 @@ function createSucceededGenerationForImageRefresh(
 
     return Generation::create(array_merge([
         'user_id' => $user->id,
-        'pixelforge_id' => 'gen_image_refresh_' . uniqid(),
-        'idempotency_key' => 'local_' . uniqid(),
-        'provider_idempotency_key' => 'provider_' . uniqid(),
+        'pixelforge_id' => 'gen_image_refresh_'.uniqid(),
+        'idempotency_key' => 'local_'.uniqid(),
+        'provider_idempotency_key' => 'provider_'.uniqid(),
         'request_hash' => hash('sha256', uniqid()),
         'prompt' => 'A cinematic mountain landscape',
         'size' => '1024x1024',
@@ -87,8 +88,7 @@ it('refreshes an expired image URL from Pixelforge', function () {
         ->toBe('https://pixelforge.promptedit.dev/images/refreshed.png?signature=test')
         ->and($result->image_url_expires_at->isFuture())->toBeTrue();
 
-    Http::assertSent(fn ($request) =>
-        $request->method() === 'GET'
+    Http::assertSent(fn ($request) => $request->method() === 'GET'
         && $request->url() ===
             "https://pixelforge.promptedit.dev/v1/generations/{$generation->pixelforge_id}"
         && $request->hasHeader('Authorization', 'Bearer test-api-key')
@@ -222,4 +222,3 @@ it('preserves local data when the provider request fails', function () {
         ->and($generation->provider_cost)->toBe('0.010000000')
         ->and($generation->customer_price)->toBe('0.012500000');
 });
-

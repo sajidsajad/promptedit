@@ -3,7 +3,10 @@
 use App\Jobs\SubmitGeneration;
 use App\Models\Generation;
 use App\Models\User;
+use App\Models\WalletTransaction;
 use App\Services\Generations\GenerationProviderService;
+use App\Services\Wallet\WalletReleaseService;
+use App\Services\Wallet\WalletReservationService;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
 
@@ -11,7 +14,12 @@ function createGenerationForSubmissionTest(array $overrides = []): Generation
 {
     $user = User::factory()->create();
 
-    return Generation::create(array_merge([
+    $user->wallet()->update([
+        'balance' => '10.000000000',
+        'reserved_balance' => '0.000000000',
+    ]);
+
+    $generation = Generation::create(array_merge([
         'user_id' => $user->id,
         'idempotency_key' => 'submission-test-key',
         'provider_idempotency_key' => 'provider-submission-test-key',
@@ -26,6 +34,16 @@ function createGenerationForSubmissionTest(array $overrides = []): Generation
         'provider_cost' => '0.000000000',
         'customer_price' => '0.000000000',
     ], $overrides));
+
+    // Only queued, not-yet-submitted generations should hold a reservation.
+    if ($generation->status === 'queued' && $generation->pixelforge_id === null) {
+        app(WalletReservationService::class)->reserve(
+            $generation,
+            '1.000000000'
+        );
+    }
+
+    return $generation;
 }
 
 function providerRequestException(
@@ -50,6 +68,7 @@ function providerRequestException(
 
     return new RequestException($response);
 }
+
 it('rethrows temporary concurrency limit errors so Laravel can retry', function () {
     $generation = createGenerationForSubmissionTest();
 
@@ -66,10 +85,13 @@ it('rethrows temporary concurrency limit errors so Laravel can retry', function 
     expect(
         fn () => app(SubmitGeneration::class, [
             'generationId' => $generation->id,
-        ])->handle($provider)
+        ])->handle($provider, app(WalletReleaseService::class))
     )->toThrow(RequestException::class);
 
     $generation->refresh();
+
+    expect($generation->user->wallet()->first()->reserved_balance)
+        ->toBe('1.000000000');
 
     expect($generation->status)->toBe('queued')
         ->and($generation->error_code)->toBeNull()
@@ -92,10 +114,13 @@ it('rethrows temporary provider overload errors so Laravel can retry', function 
     expect(
         fn () => app(SubmitGeneration::class, [
             'generationId' => $generation->id,
-        ])->handle($provider)
+        ])->handle($provider, app(WalletReleaseService::class))
     )->toThrow(RequestException::class);
 
     $generation->refresh();
+
+    expect($generation->user->wallet()->first()->reserved_balance)
+        ->toBe('1.000000000');
 
     expect($generation->status)->toBe('queued')
         ->and($generation->error_code)->toBeNull();
@@ -116,9 +141,20 @@ it('marks a permanent provider authentication rejection as failed without billin
 
     app(SubmitGeneration::class, [
         'generationId' => $generation->id,
-    ])->handle($provider);
+    ])->handle($provider, app(WalletReleaseService::class));
 
     $generation->refresh();
+
+    $wallet = $generation->user->wallet()->first();
+
+    $releaseTransaction = WalletTransaction::query()
+        ->where('reference', "generation:{$generation->id}:release")
+        ->first();
+
+    expect($wallet->balance)->toBe('10.000000000')
+        ->and($wallet->reserved_balance)->toBe('0.000000000')
+        ->and($releaseTransaction)->not->toBeNull()
+        ->and($releaseTransaction->amount)->toBe('1.000000000');
 
     expect($generation->status)->toBe('failed')
         ->and($generation->error_code)->toBe('invalid_api_key')
@@ -140,7 +176,7 @@ it('does not submit a generation that already has a provider ID', function () {
 
     app(SubmitGeneration::class, [
         'generationId' => $generation->id,
-    ])->handle($provider);
+    ])->handle($provider, app(WalletReleaseService::class));
 
     expect($generation->fresh()->pixelforge_id)
         ->toBe('gen_already_submitted');
@@ -156,6 +192,9 @@ it('records retry exhaustion without prematurely failing the generation', functi
     );
 
     $generation->refresh();
+
+    expect($generation->user->wallet()->first()->reserved_balance)
+        ->toBe('1.000000000');
 
     expect($generation->status)->toBe('queued')
         ->and($generation->error_code)->toBe('submission_retry_exhausted')
@@ -202,7 +241,7 @@ it('uses the provider Retry-After header for concurrency limit errors', function
     $job = new SubmitGeneration($generation->id);
 
     expect(
-        fn () => $job->handle($provider)
+        fn () => $job->handle($provider, app(WalletReleaseService::class))
     )->toThrow(RequestException::class);
 
     expect($job->backoff())->toBe(7);
@@ -225,7 +264,7 @@ it('uses the provider Retry-After header for overload errors', function () {
     $job = new SubmitGeneration($generation->id);
 
     expect(
-        fn () => $job->handle($provider)
+        fn () => $job->handle($provider, app(WalletReleaseService::class))
     )->toThrow(RequestException::class);
 
     expect($job->backoff())->toBe(2);

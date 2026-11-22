@@ -3,6 +3,7 @@
 use App\Models\Generation;
 use App\Models\User;
 use App\Services\Generations\GenerationStateService;
+use App\Services\Wallet\WalletReservationService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -13,7 +14,12 @@ function createGenerationForStateServiceTest(
 ): Generation {
     $user = User::factory()->create();
 
-    return Generation::create(array_merge([
+    $user->wallet()->update([
+        'balance' => '10.000000000',
+        'reserved_balance' => '0.000000000',
+    ]);
+
+    $generation = Generation::create(array_merge([
         'user_id' => $user->id,
         'pixelforge_id' => 'gen_state_test_001',
         'idempotency_key' => 'state-test-key',
@@ -34,6 +40,16 @@ function createGenerationForStateServiceTest(
         'provider_cost' => '0.000000000',
         'customer_price' => '0.000000000',
     ], $overrides));
+
+    // Terminal generations already have their final billing state.
+    if (in_array($generation->status, ['queued', 'processing'], true)) {
+        app(WalletReservationService::class)->reserve(
+            $generation,
+            '1.000000000'
+        );
+    }
+
+    return $generation;
 }
 
 it('applies a successful provider snapshot and calculates billing', function () {
@@ -59,6 +75,11 @@ it('applies a successful provider snapshot and calculates billing', function () 
     );
 
     $generation->refresh();
+
+    $wallet = $generation->user->wallet()->first();
+
+    expect($wallet->balance)->toBe('9.933481250')
+        ->and($wallet->reserved_balance)->toBe('0.000000000');
 
     expect($generation->status)->toBe('succeeded')
         ->and($generation->usage['total_tokens'])->toBe(1845)
@@ -88,6 +109,11 @@ it('marks failed generations without charging the customer', function () {
     );
 
     $generation->refresh();
+
+    $wallet = $generation->user->wallet()->first();
+
+    expect($wallet->balance)->toBe('10.000000000')
+        ->and($wallet->reserved_balance)->toBe('0.000000000');
 
     expect($generation->status)->toBe('failed')
         ->and($generation->error_code)->toBe('generation_failed')

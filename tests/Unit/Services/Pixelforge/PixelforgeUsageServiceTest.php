@@ -1,9 +1,7 @@
 <?php
 
-use App\Services\Pixelforge\PixelforgeClient;
 use App\Services\Pixelforge\PixelforgeUsageService;
 use Illuminate\Support\Facades\Http;
-
 use Tests\TestCase;
 
 uses(TestCase::class);
@@ -76,25 +74,25 @@ it('rejects an invalid start date', function () {
         '2026-02-30',
         '2026-03-02'
     );
-})->throws(\InvalidArgumentException::class);
+})->throws(InvalidArgumentException::class);
 
 it('rejects an invalid end date', function () {
     app(PixelforgeUsageService::class)->getUsage(
         '2026-11-01',
         'not-a-date'
     );
-})->throws(\InvalidArgumentException::class);
+})->throws(InvalidArgumentException::class);
 
 it('rejects a start date after the end date', function () {
     app(PixelforgeUsageService::class)->getUsage(
         '2026-11-10',
         '2026-11-01'
     );
-})->throws(\InvalidArgumentException::class);
+})->throws(InvalidArgumentException::class);
 
 it('rejects a date range longer than 92 inclusive days', function () {
     app(PixelforgeUsageService::class)->getUsage(
         '2026-01-01',
         '2026-04-03'
     );
-})->throws(\InvalidArgumentException::class);
+})->throws(InvalidArgumentException::class);

@@ -5,6 +5,7 @@ use App\Models\Generation;
 use App\Models\User;
 use App\Services\Generations\GenerationStateService;
 use App\Services\Pixelforge\PixelforgeClient;
+use App\Services\Wallet\WalletReservationService;
 use Illuminate\Support\Facades\Http;
 
 function createGenerationForReconciliationTest(
@@ -12,7 +13,12 @@ function createGenerationForReconciliationTest(
 ): Generation {
     $user = User::factory()->create();
 
-    return Generation::create(array_merge([
+    // Give the test user enough credits to cover the reservation.
+    $user->wallet()->firstOrFail()->update([
+        'balance' => '10.000000000',
+    ]);
+
+    $generation = Generation::create(array_merge([
         'user_id' => $user->id,
         'pixelforge_id' => 'gen_reconcile_test_001',
         'idempotency_key' => 'reconcile-test-key',
@@ -34,6 +40,19 @@ function createGenerationForReconciliationTest(
         'customer_price' => '0.000000000',
         'started_at' => now()->subMinutes(3),
     ], $overrides));
+
+    // Only active generations with a provider ID need a reservation.
+    if (
+        $generation->pixelforge_id !== null
+        && in_array($generation->status, ['queued', 'processing'], true)
+    ) {
+        app(WalletReservationService::class)->reserve(
+            $generation,
+            '1.000000000'
+        );
+    }
+
+    return $generation;
 }
 
 beforeEach(function () {
