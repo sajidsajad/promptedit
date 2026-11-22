@@ -7,6 +7,7 @@ use App\Models\Generation;
 use App\Models\WalletTransaction;
 use App\Services\Generations\GenerationProviderService;
 use App\Services\Wallet\WalletReleaseService;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Http\Client\RequestException;
@@ -14,7 +15,7 @@ use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\DB;
 use Throwable;
 
-class SubmitGeneration implements ShouldQueue
+class SubmitGeneration implements ShouldBeUnique, ShouldQueue
 {
     use Queueable;
 
@@ -32,6 +33,19 @@ class SubmitGeneration implements ShouldQueue
      * Maximum execution time for one attempt.
      */
     public int $timeout = 45;
+
+    /**
+     * Keep duplicate submission jobs for the same generation out of the queue.
+     */
+    public int $uniqueFor = 600;
+
+    /**
+     * Use the generation ID as the unique queue lock identity.
+     */
+    public function uniqueId(): string
+    {
+        return (string) $this->generationId;
+    }
 
     /**
      * Provider-requested retry delay, when available.

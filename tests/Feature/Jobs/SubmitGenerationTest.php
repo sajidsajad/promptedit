@@ -8,6 +8,7 @@ use App\Models\WalletTransaction;
 use App\Services\Generations\GenerationProviderService;
 use App\Services\Wallet\WalletReleaseService;
 use App\Services\Wallet\WalletReservationService;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
 
@@ -374,4 +375,14 @@ it('does not resubmit a failed generation or reserve credits again', function ()
         ->and($wallet->reserved_balance)->toBe('0.000000000')
         ->and($reserveCount)->toBe(1)
         ->and($releaseCount)->toBe(1);
+});
+
+it('uses the generation ID as its unique job identity', function () {
+    $generation = createGenerationForSubmissionTest();
+
+    $job = new SubmitGeneration($generation->id);
+
+    expect($job)
+        ->toBeInstanceOf(ShouldBeUnique::class)
+        ->and($job->uniqueId())->toBe((string) $generation->id);
 });

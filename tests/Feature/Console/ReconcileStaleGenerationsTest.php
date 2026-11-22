@@ -1,6 +1,7 @@
 <?php
 
 use App\Jobs\ReconcileGeneration;
+use App\Jobs\SubmitGeneration;
 use App\Models\Generation;
 use App\Models\User;
 use Illuminate\Support\Carbon;
@@ -120,4 +121,52 @@ it('ignores terminal generations and generations without a provider ID', functio
     Artisan::call('app:reconcile-stale-generations');
 
     Bus::assertNotDispatched(ReconcileGeneration::class);
+});
+
+it('dispatches submission recovery for stale generations with exhausted retries', function () {
+    $generation = createGenerationForReconciliationCommandTest([
+        'status' => 'queued',
+        'pixelforge_id' => null,
+        'error_code' => 'submission_retry_exhausted',
+        'updated_at' => now()->subMinutes(3),
+    ]);
+
+    Bus::fake();
+
+    Artisan::call('app:reconcile-stale-generations');
+
+    Bus::assertDispatched(
+        SubmitGeneration::class,
+        fn (SubmitGeneration $job) => $job->generationId === $generation->id
+    );
+});
+
+it('does not dispatch submission recovery for fresh exhausted generations', function () {
+    createGenerationForReconciliationCommandTest([
+        'status' => 'queued',
+        'pixelforge_id' => null,
+        'error_code' => 'submission_retry_exhausted',
+        'updated_at' => now()->subMinute(),
+    ]);
+
+    Bus::fake();
+
+    Artisan::call('app:reconcile-stale-generations');
+
+    Bus::assertNotDispatched(SubmitGeneration::class);
+});
+
+it('does not recover stale queued generations without an exhausted-retry error', function () {
+    createGenerationForReconciliationCommandTest([
+        'status' => 'queued',
+        'pixelforge_id' => null,
+        'error_code' => null,
+        'updated_at' => now()->subMinutes(5),
+    ]);
+
+    Bus::fake();
+
+    Artisan::call('app:reconcile-stale-generations');
+
+    Bus::assertNotDispatched(SubmitGeneration::class);
 });
