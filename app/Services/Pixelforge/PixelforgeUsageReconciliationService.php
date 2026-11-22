@@ -45,41 +45,41 @@ class PixelforgeUsageReconciliationService
 
         $providerDays = [];
 
-foreach ($providerReport['data'] ?? [] as $record) {
-    if (! is_array($record)) {
-        throw new InvalidArgumentException(
-            'Provider usage contains an invalid daily record.'
-        );
-    }
+        foreach ($providerReport['data'] ?? [] as $record) {
+            if (! is_array($record)) {
+                throw new InvalidArgumentException(
+                    'Provider usage contains an invalid daily record.'
+                );
+            }
 
-    $date = $this->parseProviderDate($record['date'] ?? null);
+            $date = $this->parseProviderDate($record['date'] ?? null);
 
-    $providerDays[$date] = [
-        'generations' => $this->nonNegativeInteger(
-            $record['generations'] ?? null,
-            'generations'
-        ),
-        'input_text_tokens' => $this->nonNegativeInteger(
-            $record['input_text_tokens'] ?? null,
-            'input_text_tokens'
-        ),
-        'input_image_tokens' => $this->nonNegativeInteger(
-            $record['input_image_tokens'] ?? null,
-            'input_image_tokens'
-        ),
-        'output_tokens' => $this->nonNegativeInteger(
-            $record['output_tokens'] ?? null,
-            'output_tokens'
-        ),
-        'reasoning_tokens' => $this->nonNegativeInteger(
-            $record['reasoning_tokens'] ?? null,
-            'reasoning_tokens'
-        ),
-        'provider_cost' => $this->normalizeMoney(
-            $record['cost_usd'] ?? '0.000000000'
-        ),
-    ];
-}
+            $providerDays[$date] = [
+                'generations' => $this->nonNegativeInteger(
+                    $record['generations'] ?? null,
+                    'generations'
+                ),
+                'input_text_tokens' => $this->nonNegativeInteger(
+                    $record['input_text_tokens'] ?? null,
+                    'input_text_tokens'
+                ),
+                'input_image_tokens' => $this->nonNegativeInteger(
+                    $record['input_image_tokens'] ?? null,
+                    'input_image_tokens'
+                ),
+                'output_tokens' => $this->nonNegativeInteger(
+                    $record['output_tokens'] ?? null,
+                    'output_tokens'
+                ),
+                'reasoning_tokens' => $this->nonNegativeInteger(
+                    $record['reasoning_tokens'] ?? null,
+                    'reasoning_tokens'
+                ),
+                'provider_cost' => $this->normalizeMoney(
+                    $record['cost_usd'] ?? '0.000000000'
+                ),
+            ];
+        }
         $localDays = $this->getLocalUsage(
             $start,
             $end
@@ -199,72 +199,72 @@ foreach ($providerReport['data'] ?? [] as $record) {
         ];
     }
 
-/**
- * Validate a provider date without accepting normalized invalid dates.
- */
-private function parseProviderDate(mixed $value): string
-{
-    if (
-        ! is_string($value) ||
-        ! preg_match('/^\d{4}-\d{2}-\d{2}$/', $value)
-    ) {
-        throw new InvalidArgumentException(
-            'Provider usage contains an invalid date.'
-        );
-    }
-
-    $date = CarbonImmutable::createFromFormat(
-        '!Y-m-d',
-        $value,
-        'UTC'
-    );
-
-    $errors = CarbonImmutable::getLastErrors();
-
-    if (
-        $date === false ||
-        ($errors !== false && (
-            $errors['warning_count'] > 0 ||
-            $errors['error_count'] > 0
-        )) ||
-        $date->format('Y-m-d') !== $value
-    ) {
-        throw new InvalidArgumentException(
-            'Provider usage contains an invalid date.'
-        );
-    }
-
-    return $value;
-}
-
-/**
- * Accept only non-negative integer token and generation counts.
- */
-private function nonNegativeInteger(
-    mixed $value,
-    string $field
-): int {
-    if (
-        ! is_int($value) && (
+    /**
+     * Validate a provider date without accepting normalized invalid dates.
+     */
+    private function parseProviderDate(mixed $value): string
+    {
+        if (
             ! is_string($value) ||
-            ! preg_match('/^\d+$/', $value)
-        )
-    ) {
-        throw new InvalidArgumentException(
-            "Provider usage contains an invalid {$field} count."
+            ! preg_match('/^\d{4}-\d{2}-\d{2}$/', $value)
+        ) {
+            throw new InvalidArgumentException(
+                'Provider usage contains an invalid date.'
+            );
+        }
+
+        $date = CarbonImmutable::createFromFormat(
+            '!Y-m-d',
+            $value,
+            'UTC'
         );
+
+        $errors = CarbonImmutable::getLastErrors();
+
+        if (
+            $date === false ||
+            ($errors !== false && (
+                $errors['warning_count'] > 0 ||
+                $errors['error_count'] > 0
+            )) ||
+            $date->format('Y-m-d') !== $value
+        ) {
+            throw new InvalidArgumentException(
+                'Provider usage contains an invalid date.'
+            );
+        }
+
+        return $value;
     }
 
-    $integer = (int) $value;
+    /**
+     * Accept only non-negative integer token and generation counts.
+     */
+    private function nonNegativeInteger(
+        mixed $value,
+        string $field
+    ): int {
+        if (
+            ! is_int($value) && (
+                ! is_string($value) ||
+                ! preg_match('/^\d+$/', $value)
+            )
+        ) {
+            throw new InvalidArgumentException(
+                "Provider usage contains an invalid {$field} count."
+            );
+        }
 
-    if ($integer < 0) {
-        throw new InvalidArgumentException(
-            "Provider usage contains a negative {$field} count."
-        );
+        $integer = (int) $value;
+
+        if ($integer < 0) {
+            throw new InvalidArgumentException(
+                "Provider usage contains a negative {$field} count."
+            );
+        }
+
+        return $integer;
     }
-
-    return $integer;
-}
 
     private function normalizeMoney(string $amount): string
     {

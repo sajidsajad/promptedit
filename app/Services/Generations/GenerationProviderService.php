@@ -6,6 +6,7 @@ use App\Jobs\ProcessPixelforgeWebhook;
 use App\Models\Generation;
 use App\Models\WebhookEvent;
 use App\Services\Pixelforge\PixelforgeClient;
+use App\Services\Wallet\WalletReservationService;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
 use UnexpectedValueException;
@@ -13,7 +14,9 @@ use UnexpectedValueException;
 class GenerationProviderService
 {
     public function __construct(
-        private readonly PixelforgeClient $pixelforge
+        private readonly PixelforgeClient $pixelforge,
+        private readonly GenerationReservationCalculator $reservationCalculator,
+        private readonly WalletReservationService $walletReservationService
     ) {}
 
     /**
@@ -23,21 +26,71 @@ class GenerationProviderService
     {
         $generation->refresh();
 
+        // Terminal generations must never be submitted again.
+        if (in_array($generation->status, ['succeeded', 'failed'], true)) {
+            return $generation;
+        }
+
         // Never submit a generation again if its provider ID is already saved.
         if ($generation->pixelforge_id !== null) {
             return $generation;
         }
+        // A pricing snapshot must contain both rates and token estimation rules.
+        $hasRates = ! empty($generation->pricing_rates);
+        $hasTokens = ! empty($generation->pricing_tokens);
 
-        // Reuse the original pricing snapshot when retrying.
-        if (empty($generation->pricing_rates)) {
+        // Reject incomplete snapshots instead of mixing different pricing versions.
+        if ($hasRates !== $hasTokens) {
+            throw new UnexpectedValueException(
+                'The generation has an incomplete pricing snapshot.'
+            );
+        }
+
+        // Fetch pricing only when no snapshot exists.
+        if (! $hasRates && ! $hasTokens) {
+            // Network activity happens outside the database transaction.
             $pricing = $this->pixelforge->getPricing();
 
+            // Validate both structures before attempting persistence.
             $rates = $this->validatePricingRates(
                 $pricing['rates'] ?? null
             );
 
-            $generation->pricing_rates = $rates;
-            $generation->save();
+            $tokens = $this->validatePricingTokens(
+                $pricing['tokens'] ?? null
+            );
+
+            DB::transaction(function () use (
+                $generation,
+                $rates,
+                $tokens
+            ): void {
+                // Lock the generation to serialize concurrent snapshot writes.
+                $localGeneration = Generation::query()
+                    ->lockForUpdate()
+                    ->findOrFail($generation->id);
+
+                $hasLocalRates = ! empty($localGeneration->pricing_rates);
+                $hasLocalTokens = ! empty($localGeneration->pricing_tokens);
+
+                // Never allow an incomplete snapshot.
+                if ($hasLocalRates !== $hasLocalTokens) {
+                    throw new UnexpectedValueException(
+                        'The generation has an incomplete pricing snapshot.'
+                    );
+                }
+
+                // Another worker may have saved pricing while we were
+                // fetching it. Preserve that worker's complete snapshot.
+                if (! $hasLocalRates && ! $hasLocalTokens) {
+                    $localGeneration->pricing_rates = $rates;
+                    $localGeneration->pricing_tokens = $tokens;
+                    $localGeneration->save();
+                }
+            });
+
+            // Use the snapshot that actually won the database race.
+            $generation->refresh();
         }
 
         if (
@@ -62,6 +115,26 @@ class GenerationProviderService
         if (! empty($generation->metadata)) {
             $payload['metadata'] = $generation->metadata;
         }
+
+        // Calculate the maximum customer charge using the saved pricing snapshot.
+        // This includes the 25% markup and protects against under-reserving.
+        $referenceImageCount = count($generation->reference_images ?? []);
+
+        $reservationAmount = $this->reservationCalculator->calculate(
+            $generation->prompt,
+            $generation->size,
+            $generation->quality,
+            $referenceImageCount,
+            $generation->pricing_rates,
+            $generation->pricing_tokens
+        );
+
+        // Reserve credits before contacting Pixelforge.
+        // This operation is idempotent, so retries will not reserve twice.
+        $this->walletReservationService->reserve(
+            $generation,
+            $reservationAmount
+        );
 
         // The provider idempotency key protects retries if the HTTP
         // request succeeds but our application does not receive its response.
@@ -293,6 +366,109 @@ class GenerationProviderService
     }
 
     /**
+     * Validate Pixelforge token estimation rules before saving the snapshot.
+     */
+    private function validatePricingTokens(mixed $tokens): array
+    {
+        if (! is_array($tokens)) {
+            throw new UnexpectedValueException(
+                'Pixelforge returned invalid token pricing.'
+            );
+        }
+
+        $charactersPerToken = $tokens['characters_per_text_token'] ?? null;
+        $variance = $tokens['text_token_variance'] ?? null;
+        $imageTokens = $tokens['per_reference_image'] ?? null;
+
+        if (
+            ! is_int($charactersPerToken)
+            || $charactersPerToken <= 0
+            || ! is_numeric($variance)
+            || ! is_int($imageTokens)
+            || $imageTokens < 0
+        ) {
+            throw new UnexpectedValueException(
+                'Pixelforge returned invalid token estimation settings.'
+            );
+        }
+
+        // Accept a decimal variance between 0 and 1, with at most 4 decimals.
+        $varianceString = (string) $variance;
+
+        if (
+            ! preg_match('/^(0|1)(?:\.(\d{1,4}))?$/', $varianceString, $matches)
+            || (
+                (int) $matches[1] === 1
+                && isset($matches[2])
+                && (int) $matches[2] !== 0
+            )
+        ) {
+            throw new UnexpectedValueException(
+                'Pixelforge returned an invalid text token variance.'
+            );
+        }
+
+        $qualities = ['low', 'medium', 'high'];
+        $sizes = ['1024x1024', '1536x1024', '1024x1536'];
+
+        $output = $tokens['output'] ?? null;
+        $reasoning = $tokens['reasoning'] ?? null;
+
+        if (! is_array($output) || ! is_array($reasoning)) {
+            throw new UnexpectedValueException(
+                'Pixelforge returned incomplete token pricing.'
+            );
+        }
+
+        foreach ($qualities as $quality) {
+            if (
+                ! isset($output[$quality])
+                || ! is_array($output[$quality])
+                || ! isset($reasoning[$quality])
+                || ! is_array($reasoning[$quality])
+            ) {
+                throw new UnexpectedValueException(
+                    "Pixelforge returned incomplete token pricing for {$quality} quality."
+                );
+            }
+
+            foreach ($sizes as $size) {
+                if (
+                    ! isset($output[$quality][$size])
+                    || ! is_int($output[$quality][$size])
+                    || $output[$quality][$size] < 0
+                ) {
+                    throw new UnexpectedValueException(
+                        "Pixelforge returned invalid output tokens for {$quality} quality and {$size}."
+                    );
+                }
+            }
+
+            $minimum = $reasoning[$quality]['min'] ?? null;
+            $maximum = $reasoning[$quality]['max'] ?? null;
+
+            if (
+                ! is_int($minimum)
+                || ! is_int($maximum)
+                || $minimum < 0
+                || $maximum < $minimum
+            ) {
+                throw new UnexpectedValueException(
+                    "Pixelforge returned invalid reasoning tokens for {$quality} quality."
+                );
+            }
+        }
+
+        return [
+            'characters_per_text_token' => $charactersPerToken,
+            'text_token_variance' => $variance,
+            'per_reference_image' => $imageTokens,
+            'output' => $output,
+            'reasoning' => $reasoning,
+        ];
+    }
+
+    /**
      * Validate the four provider rates before saving the snapshot.
      */
     private function validatePricingRates(mixed $rates): array
@@ -315,10 +491,10 @@ class GenerationProviderService
 
             if (
                 ! is_string($rate)
-                || ! preg_match('/^\d+(\.\d+)?$/', $rate)
+|| ! preg_match('/^\d+(?:\.\d{1,9})?$/', $rate)
             ) {
                 throw new UnexpectedValueException(
-                    "Pixelforge returned an invalid rate: {$rateName}."
+                    "Pixelforge returned an invalid rate or unsupported decimal precision: {$rateName}."
                 );
             }
         }
@@ -329,4 +505,3 @@ class GenerationProviderService
         );
     }
 }
-

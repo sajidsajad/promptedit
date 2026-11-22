@@ -33,33 +33,48 @@ use Laravel\Fortify\TwoFactorAuthenticatable;
 #[Hidden(['password', 'two_factor_secret', 'two_factor_recovery_codes', 'remember_token'])]
 class User extends Authenticatable implements MustVerifyEmail, PasskeyUser
 {
+    protected $attributes = [
+        'is_admin' => false,
+    ];
 
-protected $attributes = [
-    'is_admin' => false,
-];
     /** @use HasFactory<UserFactory> */
     use HasFactory, Notifiable, PasskeyAuthenticatable, TwoFactorAuthenticatable;
+
+    /**
+     * Automatically provision a zero-balance wallet for every new user.
+     */
+    protected static function booted(): void
+    {
+        static::created(function (User $user): void {
+            $user->wallet()->firstOrCreate([], [
+                'balance' => '0.000000000',
+                'reserved_balance' => '0.000000000',
+            ]);
+        });
+    }
 
     /**
      * Get the attributes that should be cast.
      *
      * @return array<string, string>
      */
-protected function casts(): array
-{
-    return [
-        'email_verified_at' => 'datetime',
-        'password' => 'hashed',
-        'two_factor_confirmed_at' => 'datetime',
-        'is_admin' => 'boolean',
-    ];
-}
+    protected function casts(): array
+    {
+        return [
+            'email_verified_at' => 'datetime',
+            'password' => 'hashed',
+            'two_factor_confirmed_at' => 'datetime',
+            'is_admin' => 'boolean',
+        ];
+    }
+
     public function generations(): HasMany
     {
         return $this->hasMany(Generation::class);
     }
-public function wallet(): HasOne
-{
-    return $this->hasOne(Wallet::class);
-}
+
+    public function wallet(): HasOne
+    {
+        return $this->hasOne(Wallet::class);
+    }
 }

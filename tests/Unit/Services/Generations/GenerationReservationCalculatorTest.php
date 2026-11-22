@@ -44,7 +44,7 @@ function reservationTokenPricing(): array
 }
 
 it('calculates the maximum customer reservation from the Pixelforge example', function () {
-    $calculator = new GenerationReservationCalculator;
+    $calculator = app(GenerationReservationCalculator::class);
 
     $reservation = $calculator->calculate(
         prompt: str_repeat('a', 400),
@@ -59,7 +59,7 @@ it('calculates the maximum customer reservation from the Pixelforge example', fu
 });
 
 it('calculates reservations without reference images', function () {
-    $calculator = new GenerationReservationCalculator;
+    $calculator = app(GenerationReservationCalculator::class);
 
     $reservation = $calculator->calculate(
         prompt: 'A mountain landscape',
@@ -74,7 +74,7 @@ it('calculates reservations without reference images', function () {
 });
 
 it('uses the maximum reasoning tokens for the requested quality', function () {
-    $calculator = new GenerationReservationCalculator;
+    $calculator = app(GenerationReservationCalculator::class);
 
     $low = $calculator->calculate(
         prompt: 'Test',
@@ -98,7 +98,7 @@ it('uses the maximum reasoning tokens for the requested quality', function () {
 });
 
 it('rejects unsupported generation sizes', function () {
-    $calculator = new GenerationReservationCalculator;
+    $calculator = app(GenerationReservationCalculator::class);
 
     $calculator->calculate(
         prompt: 'Test',
@@ -111,7 +111,7 @@ it('rejects unsupported generation sizes', function () {
 })->throws(InvalidArgumentException::class);
 
 it('rejects unsupported generation quality', function () {
-    $calculator = new GenerationReservationCalculator;
+    $calculator = app(GenerationReservationCalculator::class);
 
     $calculator->calculate(
         prompt: 'Test',
@@ -124,7 +124,7 @@ it('rejects unsupported generation quality', function () {
 })->throws(InvalidArgumentException::class);
 
 it('rejects invalid reference image counts', function () {
-    $calculator = new GenerationReservationCalculator;
+    $calculator = app(GenerationReservationCalculator::class);
 
     $calculator->calculate(
         prompt: 'Test',
@@ -137,7 +137,7 @@ it('rejects invalid reference image counts', function () {
 })->throws(InvalidArgumentException::class);
 
 it('rejects incomplete token pricing configuration', function () {
-    $calculator = new GenerationReservationCalculator;
+    $calculator = app(GenerationReservationCalculator::class);
 
     $calculator->calculate(
         prompt: 'Test',

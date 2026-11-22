@@ -4,6 +4,8 @@ namespace App\Services\Generations;
 
 use App\Models\Generation;
 use App\Services\Pixelforge\GenerationCostCalculator;
+use App\Services\Wallet\WalletReleaseService;
+use App\Services\Wallet\WalletSettlementService;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use UnexpectedValueException;
@@ -11,7 +13,9 @@ use UnexpectedValueException;
 class GenerationStateService
 {
     public function __construct(
-        private readonly GenerationCostCalculator $costCalculator
+        private readonly GenerationCostCalculator $costCalculator,
+        private readonly WalletSettlementService $settlementService,
+        private readonly WalletReleaseService $releaseService
     ) {}
 
     /**
@@ -116,6 +120,13 @@ class GenerationStateService
                     $generation->pricing_rates
                 );
 
+                // Charge the actual customer price and release the unused reservation.
+                // This runs inside the generation transaction.
+                $this->settlementService->settle(
+                    $generation,
+                    $costs['customer_price']
+                );
+
                 $generation->usage = $usage;
                 $generation->provider_cost = $costs['provider_cost'];
                 $generation->customer_price = $costs['customer_price'];
@@ -132,6 +143,10 @@ class GenerationStateService
             }
 
             if ($providerStatus === 'failed') {
+
+                // A confirmed provider failure must release the full reservation.
+                $this->releaseService->release($generation);
+
                 $error = $snapshot['error'] ?? null;
 
                 $generation->error_code = is_array($error)

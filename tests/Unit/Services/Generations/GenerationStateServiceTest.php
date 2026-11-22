@@ -2,8 +2,10 @@
 
 use App\Models\Generation;
 use App\Models\User;
+use App\Models\WalletTransaction;
 use App\Services\Generations\GenerationStateService;
 use App\Services\Wallet\WalletReservationService;
+use App\Services\Wallet\WalletSettlementService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -203,4 +205,66 @@ it('rejects a webhook status that does not match its event type', function () {
             'succeeded'
         )
     )->toThrow(UnexpectedValueException::class);
+});
+
+it('rolls back wallet settlement when generation processing fails afterward', function () {
+    $generation = createGenerationForStateServiceTest();
+
+    $wallet = $generation->user->wallet()->firstOrFail();
+
+    $originalBalance = $wallet->balance;
+    $originalReservedBalance = $wallet->reserved_balance;
+
+    // Keep the real service so the wallet and ledger are genuinely updated.
+    $realSettlementService = app(WalletSettlementService::class);
+
+    // Simulate a failure immediately after the real settlement completes.
+    $failingSettlementService = Mockery::mock(WalletSettlementService::class);
+
+    $failingSettlementService
+        ->shouldReceive('settle')
+        ->once()
+        ->andReturnUsing(function ($generation, $amount) use ($realSettlementService): void {
+            $realSettlementService->settle($generation, $amount);
+
+            throw new RuntimeException('Simulated failure after wallet settlement.');
+        });
+
+    // Ensure GenerationStateService receives our controlled service.
+    app()->instance(WalletSettlementService::class, $failingSettlementService);
+    app()->forgetInstance(GenerationStateService::class);
+
+    $service = app(GenerationStateService::class);
+
+    expect(fn () => $service->apply(
+        $generation->id,
+        [
+            'id' => $generation->pixelforge_id,
+            'status' => 'succeeded',
+            'usage' => [
+                'input_text_tokens' => 13,
+                'input_image_tokens' => 0,
+                'output_tokens' => 1100,
+                'reasoning_tokens' => 732,
+                'total_tokens' => 1845,
+            ],
+            'image_url' => 'https://example.com/generated-image.png',
+        ],
+        'succeeded'
+    ))->toThrow(RuntimeException::class, 'Simulated failure after wallet settlement.');
+
+    // Refresh everything from the database after the exception.
+    $generation->refresh();
+    $wallet->refresh();
+
+    expect($wallet->balance)->toBe($originalBalance)
+        ->and($wallet->reserved_balance)->toBe($originalReservedBalance)
+        ->and($generation->status)->toBe('queued')
+        ->and($generation->customer_price)->toBe('0.000000000')
+        ->and(
+            WalletTransaction::query()
+                ->where('generation_id', $generation->id)
+                ->where('type', 'settle')
+                ->count()
+        )->toBe(0);
 });

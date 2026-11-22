@@ -60,7 +60,7 @@ class GenerationCostCalculator
 
             if (
                 ! is_string($rates[$type]) ||
-                ! preg_match('/^\d+(\.\d+)?$/', $rates[$type])
+! preg_match('/^\d+(?:\.\d{1,9})?$/', $rates[$type])
             ) {
                 throw new InvalidArgumentException(
                     "Pricing rate must be a non-negative decimal string: {$type}"

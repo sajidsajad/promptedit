@@ -3,6 +3,7 @@
 use App\Models\Generation;
 use App\Models\User;
 use App\Models\WalletTransaction;
+use App\Services\Wallet\WalletReleaseService;
 use App\Services\Wallet\WalletReservationService;
 use App\Services\Wallet\WalletSettlementService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -163,4 +164,25 @@ it('records the settlement with correct ledger balance snapshots', function () {
         ->and($transaction->reserved_balance_after)->toBe('0.000000000')
         ->and($transaction->reference)
         ->toBe("generation:{$generation->id}:settle");
+});
+
+it('rejects settlement after the reservation has been released', function () {
+    [, $generation] = createWalletSettlementFixture(
+        reservation: '1.000000000'
+    );
+
+    $releaseService = app(WalletReleaseService::class);
+    $settlementService = app(WalletSettlementService::class);
+
+    // Release the generation's original reservation.
+    $releaseService->release($generation);
+
+    // A released reservation must never be settled afterward.
+    expect(fn () => $settlementService->settle(
+        $generation,
+        '0.500000000'
+    ))->toThrow(
+        RuntimeException::class,
+        'Cannot settle a generation after its reservation has been released.'
+    );
 });

@@ -2,12 +2,16 @@
 
 namespace App\Jobs;
 
+use App\Exceptions\InsufficientWalletCreditsException;
 use App\Models\Generation;
+use App\Models\WalletTransaction;
 use App\Services\Generations\GenerationProviderService;
+use App\Services\Wallet\WalletReleaseService;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
+use Illuminate\Support\Facades\DB;
 use Throwable;
 
 class SubmitGeneration implements ShouldQueue
@@ -42,7 +46,8 @@ class SubmitGeneration implements ShouldQueue
      * Submit the generation to Pixelforge.
      */
     public function handle(
-        GenerationProviderService $providerService
+        GenerationProviderService $providerService,
+        WalletReleaseService $releaseService
     ): void {
         $generation = Generation::find($this->generationId);
 
@@ -50,13 +55,29 @@ class SubmitGeneration implements ShouldQueue
             return;
         }
 
-        // Never submit a generation that already has a provider ID.
+        // Never submit a terminal generation again.
+        if (in_array($generation->status, ['succeeded', 'failed'], true)) {
+            return;
+        }
+
+        // Never submit a generation already associated with Pixelforge.
         if ($generation->pixelforge_id !== null) {
             return;
         }
 
         try {
             $providerService->submit($generation);
+        } catch (InsufficientWalletCreditsException $exception) {
+            // Insufficient credits are a permanent application-level failure.
+            // Reservation failed before Pixelforge submission.
+            // No reservation exists to release, and retrying cannot help.
+            $this->markPermanentFailure(
+                $releaseService,
+                'insufficient_wallet_credits',
+                $exception->getMessage()
+            );
+
+            return;
         } catch (RequestException $exception) {
             $response = $exception->response;
 
@@ -80,6 +101,7 @@ class SubmitGeneration implements ShouldQueue
 
             if ($permanentFailure) {
                 $this->markPermanentFailure(
+                    $releaseService,
                     $errorCode ?: 'provider_request_rejected',
                     $errorMessage ?: 'Pixelforge rejected the generation request.'
                 );
@@ -127,31 +149,51 @@ class SubmitGeneration implements ShouldQueue
     }
 
     /**
-     * Persist a permanent provider rejection without charging the user.
+     * Persist a permanent rejection and release reserved credits.
      */
     private function markPermanentFailure(
+        WalletReleaseService $releaseService,
         string $errorCode,
         string $errorMessage
     ): void {
-        $generation = Generation::find($this->generationId);
+        DB::transaction(function () use (
+            $releaseService,
+            $errorCode,
+            $errorMessage
+        ): void {
+            $generation = Generation::query()
+                ->lockForUpdate()
+                ->find($this->generationId);
 
-        if (! $generation || $generation->pixelforge_id !== null) {
-            return;
-        }
+            if (! $generation || $generation->pixelforge_id !== null) {
+                return;
+            }
 
-        // Never overwrite a terminal state.
-        if (in_array($generation->status, ['succeeded', 'failed'], true)) {
-            return;
-        }
+            // Never overwrite a terminal state.
+            if (in_array($generation->status, ['succeeded', 'failed'], true)) {
+                return;
+            }
 
-        $generation->status = 'failed';
-        $generation->error_code = mb_substr($errorCode, 0, 255);
-        $generation->error_message = mb_substr($errorMessage, 0, 5000);
-        $generation->provider_cost = '0.000000000';
-        $generation->customer_price = '0.000000000';
-        $generation->usage = null;
-        $generation->completed_at = now();
-        $generation->save();
+            // Release only when a reservation actually exists.
+            $hasReservation = WalletTransaction::query()
+                ->where('reference', "generation:{$generation->id}:reserve")
+                ->where('generation_id', $generation->id)
+                ->where('type', 'reserve')
+                ->exists();
+
+            if ($hasReservation) {
+                $releaseService->release($generation);
+            }
+
+            $generation->status = 'failed';
+            $generation->error_code = mb_substr($errorCode, 0, 255);
+            $generation->error_message = mb_substr($errorMessage, 0, 5000);
+            $generation->provider_cost = '0.000000000';
+            $generation->customer_price = '0.000000000';
+            $generation->usage = null;
+            $generation->completed_at = now();
+            $generation->save();
+        }, 3);
     }
 
     /**
@@ -162,23 +204,29 @@ class SubmitGeneration implements ShouldQueue
      */
     public function failed(Throwable $exception): void
     {
-        $generation = Generation::find($this->generationId);
+        DB::transaction(function () use ($exception): void {
+            $generation = Generation::query()
+                ->lockForUpdate()
+                ->find($this->generationId);
 
-        if (
-            ! $generation
-            || $generation->pixelforge_id !== null
-            || in_array($generation->status, ['succeeded', 'failed'], true)
-        ) {
-            return;
-        }
+            // The generation may have been deleted or accepted by Pixelforge.
+            if (
+                ! $generation
+                || $generation->pixelforge_id !== null
+                || in_array($generation->status, ['succeeded', 'failed'], true)
+            ) {
+                return;
+            }
 
-        $generation->error_code = 'submission_retry_exhausted';
-        $generation->error_message = mb_substr(
-            $exception->getMessage(),
-            0,
-            5000
-        );
+            $generation->error_code = 'submission_retry_exhausted';
+            $generation->error_message = mb_substr(
+                $exception->getMessage(),
+                0,
+                5000
+            );
 
-        $generation->save();
+            // Keep the generation queued and preserve its reservation.
+            $generation->save();
+        }, 3);
     }
 }

@@ -1,5 +1,6 @@
 <?php
 
+use App\Exceptions\InsufficientWalletCreditsException;
 use App\Jobs\SubmitGeneration;
 use App\Models\Generation;
 use App\Models\User;
@@ -268,4 +269,109 @@ it('uses the provider Retry-After header for overload errors', function () {
     )->toThrow(RequestException::class);
 
     expect($job->backoff())->toBe(2);
+});
+
+it('does not overwrite a generation accepted by Pixelforge when retries are exhausted', function () {
+    $generation = createGenerationForSubmissionTest();
+
+    // Simulate Pixelforge acceptance before the exhausted-retry callback runs.
+    $generation->update([
+        'pixelforge_id' => 'gen_accepted_before_retry_callback',
+        'status' => 'processing',
+        'error_code' => null,
+        'error_message' => null,
+    ]);
+
+    $job = new SubmitGeneration($generation->id);
+
+    $job->failed(new RuntimeException('Late queue failure.'));
+
+    $generation->refresh();
+
+    expect($generation->pixelforge_id)
+        ->toBe('gen_accepted_before_retry_callback')
+        ->and($generation->status)->toBe('processing')
+        ->and($generation->error_code)->toBeNull()
+        ->and($generation->error_message)->toBeNull()
+        ->and($generation->user->wallet()->first()->reserved_balance)
+        ->toBe('1.000000000');
+});
+
+it('fails immediately when wallet credits are insufficient without calling Pixelforge', function () {
+    // Create a generation without an existing wallet reservation.
+    $generation = createGenerationForSubmissionTest([
+        'status' => 'processing',
+    ]);
+
+    $generation->update([
+        'status' => 'queued',
+    ]);
+
+    $provider = Mockery::mock(GenerationProviderService::class);
+
+    $provider->shouldReceive('submit')
+        ->once()
+        ->andThrow(new InsufficientWalletCreditsException(
+            'Insufficient available wallet credits.'
+        ));
+
+    app(SubmitGeneration::class, [
+        'generationId' => $generation->id,
+    ])->handle($provider, app(WalletReleaseService::class));
+
+    $generation->refresh();
+
+    $wallet = $generation->user->wallet()->firstOrFail();
+
+    expect($generation->status)->toBe('failed')
+        ->and($generation->error_code)->toBe('insufficient_wallet_credits')
+        ->and($generation->error_message)
+        ->toBe('Insufficient available wallet credits.')
+        ->and($generation->provider_cost)->toBe('0.000000000')
+        ->and($generation->customer_price)->toBe('0.000000000')
+        ->and($wallet->reserved_balance)->toBe('0.000000000')
+        ->and(WalletTransaction::query()->count())->toBe(0);
+});
+
+it('does not resubmit a failed generation or reserve credits again', function () {
+    $generation = createGenerationForSubmissionTest();
+
+    $releaseService = app(WalletReleaseService::class);
+
+    // Simulate a permanent failure that has already released the reservation.
+    $releaseService->release($generation);
+
+    $generation->status = 'failed';
+    $generation->error_code = 'provider_request_rejected';
+    $generation->save();
+
+    $provider = Mockery::mock(GenerationProviderService::class);
+
+    // A duplicate queue delivery must never reach Pixelforge.
+    $provider->shouldNotReceive('submit');
+
+    app(SubmitGeneration::class, [
+        'generationId' => $generation->id,
+    ])->handle($provider, $releaseService);
+
+    $generation->refresh();
+
+    $wallet = $generation->user->wallet()->firstOrFail();
+
+    $reserveCount = WalletTransaction::query()
+        ->where('generation_id', $generation->id)
+        ->where('type', 'reserve')
+        ->count();
+
+    $releaseCount = WalletTransaction::query()
+        ->where('generation_id', $generation->id)
+        ->where('type', 'release')
+        ->count();
+
+    expect($generation->status)->toBe('failed')
+        ->and($generation->error_code)->toBe('provider_request_rejected')
+        ->and($wallet->balance)->toBe('10.000000000')
+        ->and($wallet->reserved_balance)->toBe('0.000000000')
+        ->and($reserveCount)->toBe(1)
+        ->and($releaseCount)->toBe(1);
 });

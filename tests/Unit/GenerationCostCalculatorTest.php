@@ -157,3 +157,44 @@ it('rejects fractional token counts', function () {
         ],
     );
 })->throws(InvalidArgumentException::class);
+
+it('accepts pricing rates with nine decimal places', function () {
+    $calculator = new GenerationCostCalculator;
+
+    $result = $calculator->calculate(
+        usage: [
+            'input_text_tokens' => 1,
+            'input_image_tokens' => 0,
+            'output_tokens' => 0,
+            'reasoning_tokens' => 0,
+        ],
+        rates: [
+            'input_text_tokens' => '5.123456789',
+            'input_image_tokens' => '10.00',
+            'output_tokens' => '40.00',
+            'reasoning_tokens' => '12.50',
+        ],
+    );
+
+    expect($result['provider_cost'])->toBe('0.000005123')
+        ->and($result['customer_price'])->toBe('0.000006403');
+});
+
+it('rejects pricing rates with more than nine decimal places', function () {
+    $calculator = new GenerationCostCalculator;
+
+    $calculator->calculate(
+        usage: [
+            'input_text_tokens' => 1,
+            'input_image_tokens' => 0,
+            'output_tokens' => 0,
+            'reasoning_tokens' => 0,
+        ],
+        rates: [
+            'input_text_tokens' => '5.1234567891',
+            'input_image_tokens' => '10.00',
+            'output_tokens' => '40.00',
+            'reasoning_tokens' => '12.50',
+        ],
+    );
+})->throws(InvalidArgumentException::class);

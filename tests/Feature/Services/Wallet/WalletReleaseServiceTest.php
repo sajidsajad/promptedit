@@ -143,3 +143,21 @@ it('records the release with correct ledger balance snapshots', function () {
         ->and($transaction->reference)
         ->toBe("generation:{$generation->id}:release");
 });
+
+it('rejects an existing release with an amount different from the reservation', function () {
+    [, $generation] = createWalletReleaseFixture();
+
+    $service = app(WalletReleaseService::class);
+
+    // Create the legitimate release first.
+    $service->release($generation);
+
+    // Simulate corrupted or manually altered ledger data.
+    WalletTransaction::query()
+        ->where('reference', "generation:{$generation->id}:release")
+        ->update(['amount' => '1.500000000']);
+
+    expect(
+        fn () => $service->release($generation)
+    )->toThrow(RuntimeException::class);
+});

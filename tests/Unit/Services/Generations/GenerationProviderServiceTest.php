@@ -3,6 +3,7 @@
 use App\Jobs\ProcessPixelforgeWebhook;
 use App\Models\Generation;
 use App\Models\User;
+use App\Models\WalletTransaction;
 use App\Models\WebhookEvent;
 use App\Services\Generations\GenerationProviderService;
 use App\Services\Generations\GenerationReservationCalculator;
@@ -405,6 +406,105 @@ it('rejects an incomplete existing pricing snapshot without provider requests', 
     expect(
         fn () => app(GenerationProviderService::class)->submit($generation)
     )->toThrow(UnexpectedValueException::class);
+
+    Http::assertNothingSent();
+});
+
+it('preserves a pricing snapshot saved by another worker during pricing retrieval', function () {
+    $generation = createQueuedGeneration();
+
+    $concurrentRates = [
+        'input_text_tokens' => '4.50',
+        'input_image_tokens' => '9.50',
+        'output_tokens' => '38.00',
+        'reasoning_tokens' => '11.50',
+    ];
+
+    $concurrentTokens = pixelforgePricingResponse()['tokens'];
+
+    Http::fake([
+        'pixelforge.promptedit.dev/v1/pricing' => function () use (
+            $generation,
+            $concurrentRates,
+            $concurrentTokens
+        ) {
+            // Simulate another worker saving its pricing snapshot
+            // while this worker is waiting for the provider response.
+            Generation::query()
+                ->whereKey($generation->id)
+                ->update([
+                    'pricing_rates' => $concurrentRates,
+                    'pricing_tokens' => $concurrentTokens,
+                ]);
+
+            return Http::response(pixelforgePricingResponse(), 200);
+        },
+
+        'pixelforge.promptedit.dev/v1/generations' => Http::response([
+            'id' => 'gen_concurrent_pricing_001',
+            'object' => 'generation',
+            'status' => 'queued',
+        ], 202),
+    ]);
+
+    $result = app(GenerationProviderService::class)->submit($generation);
+
+    $result->refresh();
+
+    expect($result->pricing_rates)->toBe($concurrentRates)
+        ->and($result->pricing_tokens)->toBe($concurrentTokens)
+        ->and($result->pixelforge_id)->toBe('gen_concurrent_pricing_001');
+});
+
+it('rejects provider pricing rates with more than nine decimal places', function () {
+    $pricing = pixelforgePricingResponse();
+
+    $pricing['rates']['output_tokens'] = '40.1234567891';
+
+    Http::fake([
+        'pixelforge.promptedit.dev/v1/pricing' => Http::response(
+            $pricing,
+            200
+        ),
+    ]);
+
+    $generation = createQueuedGeneration();
+
+    expect(
+        fn () => app(GenerationProviderService::class)->submit($generation)
+    )->toThrow(UnexpectedValueException::class);
+
+    $generation->refresh();
+
+    expect($generation->pricing_rates)->toBe([])
+        ->and($generation->pricing_tokens)->toBe([])
+        ->and($generation->pixelforge_id)->toBeNull();
+
+    Http::assertNotSent(
+        fn ($request) => $request->method() === 'POST'
+    );
+});
+
+it('does not submit or reserve credits for a terminal generation', function () {
+    Http::fake();
+
+    $generation = createQueuedGeneration([
+        'status' => 'failed',
+    ]);
+
+    $result = app(GenerationProviderService::class)->submit($generation);
+
+    $wallet = $generation->user->wallet()->firstOrFail();
+
+    $reservationCount = WalletTransaction::query()
+        ->where('generation_id', $generation->id)
+        ->where('type', 'reserve')
+        ->count();
+
+    expect($result->status)->toBe('failed')
+        ->and($result->pixelforge_id)->toBeNull()
+        ->and($wallet->reserved_balance)->toBe('0.000000000')
+        ->and($reservationCount)->toBe(0);
 
     Http::assertNothingSent();
 });

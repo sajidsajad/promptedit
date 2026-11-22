@@ -14,10 +14,11 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 ])]
 class Wallet extends Model
 {
-protected $attributes = [
-    'balance' => '0.000000000',
-    'reserved_balance' => '0.000000000',
-];
+    protected $attributes = [
+        'balance' => '0.000000000',
+        'reserved_balance' => '0.000000000',
+    ];
+
     protected function casts(): array
     {
         return [

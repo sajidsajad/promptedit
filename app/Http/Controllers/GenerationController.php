@@ -81,7 +81,7 @@ class GenerationController extends Controller
 
         try {
             $record = $providerService->refreshImageUrl($record);
-        } catch (RequestException | UnexpectedValueException $exception) {
+        } catch (RequestException|UnexpectedValueException $exception) {
             // Image refresh is auxiliary. A provider failure must not make
             // the generation status endpoint unavailable.
             report($exception);
