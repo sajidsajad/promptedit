@@ -1,4 +1,3 @@
-
 <?php
 
 use Illuminate\Foundation\Inspiring;
@@ -11,4 +10,4 @@ Artisan::command('inspire', function () {
 
 Schedule::command('app:reconcile-stale-generations')
     ->everyMinute()
-    ->withoutOverlapping();
+    ->withoutOverlapping(5);

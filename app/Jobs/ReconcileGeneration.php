@@ -25,7 +25,7 @@ class ReconcileGeneration implements ShouldBeUnique, ShouldQueue
 
     public int $timeout = 30;
 
-    public int $uniqueFor = 120;
+    public int $uniqueFor = 300;
 
     public function __construct(
         public readonly int $generationId

@@ -201,3 +201,12 @@ it('does not regress a processing generation when Pixelforge returns queued', fu
 
     expect($generation->fresh()->status)->toBe('processing');
 });
+
+it('keeps its unique lock longer than its retry window', function () {
+    $generation = createGenerationForReconciliationTest();
+
+    $job = new ReconcileGeneration($generation->id);
+
+    expect($job->uniqueFor)->toBe(300)
+        ->and($job->uniqueId())->toBe((string) $generation->id);
+});
