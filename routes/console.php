@@ -10,4 +10,5 @@ Artisan::command('inspire', function () {
 
 Schedule::command('app:reconcile-stale-generations')
     ->everyMinute()
+    ->onOneServer()
     ->withoutOverlapping(5);
