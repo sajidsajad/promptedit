@@ -18,12 +18,13 @@ test('email verification screen can be rendered', function () {
     $response->assertOk();
 });
 
-test('unverified users are redirected to the email verification prompt', function () {
+// Transactional email is not configured for this deployment, so requiring
+// verification would lock every new user out of the app.
+test('unverified users can use the app', function () {
     $user = User::factory()->unverified()->create();
 
-    $response = $this->actingAs($user)->get(route('appearance.edit'));
-
-    $response->assertRedirect(route('verification.notice'));
+    $this->actingAs($user)->get(route('appearance.edit'))->assertOk();
+    $this->actingAs($user)->get(route('dashboard'))->assertOk();
 });
 
 test('email can be verified', function () {

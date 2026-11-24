@@ -1,7 +1,7 @@
 
 <script setup lang="ts">
 import { Head, Link, router } from '@inertiajs/vue3';
-import { onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { dashboard } from '@/routes';
 
 type GenerationStatus =
@@ -18,6 +18,7 @@ interface Generation {
     status: GenerationStatus;
     provider_cost: string;
     customer_price: string;
+    estimated_price: string | null;
     image_url: string | null;
     image_url_expires_at: string | null;
     error_code: string | null;
@@ -53,7 +54,20 @@ interface BillingSummary {
     markup_total: string;
 }
 
+interface WalletSummary {
+    balance: string;
+    reserved: string;
+    available: string;
+    packs: string[];
+}
+
+interface CostEstimate {
+    estimated_price: string;
+    maximum_price: string;
+}
+
 interface Props {
+    wallet: WalletSummary;
     generations: GenerationPagination;
     filters: {
         status: GenerationStatus | null;
@@ -124,6 +138,107 @@ function applyFilter() {
 }
 
 
+function referenceImageUrls(): string[] {
+    return referenceImagesText.value
+        .split('\n')
+        .map((url) => url.trim())
+        .filter((url) => url.length > 0);
+}
+
+// ---- Cost estimate -------------------------------------------------------
+
+const estimate = ref<CostEstimate | null>(null);
+const estimateError = ref('');
+let estimateTimer: ReturnType<typeof setTimeout> | undefined;
+let estimateRequestId = 0;
+
+async function loadEstimate(): Promise<void> {
+    const requestId = ++estimateRequestId;
+
+    // Only the prompt length affects the price, so the prompt itself
+    // never has to be sent for an estimate.
+    const params = new URLSearchParams({
+        prompt_length: String([...prompt.value].length),
+        size: selectedSize.value,
+        quality: selectedQuality.value,
+        reference_count: String(Math.min(referenceImageUrls().length, 4)),
+    });
+
+    try {
+        const response = await fetch(`/generations/estimate?${params}`, {
+            credentials: 'same-origin',
+            headers: { Accept: 'application/json' },
+        });
+        const result = await response.json();
+
+        // Ignore answers to requests the user has already changed.
+        if (requestId !== estimateRequestId) {
+            return;
+        }
+
+        if (!response.ok) {
+            estimate.value = null;
+            estimateError.value =
+                result.message ?? 'Unable to calculate an estimate.';
+            return;
+        }
+
+        estimate.value = result.data;
+        estimateError.value = '';
+    } catch {
+        if (requestId === estimateRequestId) {
+            estimate.value = null;
+            estimateError.value = 'Unable to calculate an estimate.';
+        }
+    }
+}
+
+watch(
+    [prompt, selectedSize, selectedQuality, referenceImagesText],
+    () => {
+        clearTimeout(estimateTimer);
+        estimateTimer = setTimeout(() => void loadEstimate(), 400);
+    },
+);
+
+const cannotAfford = computed(
+    () =>
+        estimate.value !== null &&
+        Number(estimate.value.maximum_price) >
+            Number(props.wallet.available),
+);
+
+// ---- Credits -------------------------------------------------------------
+
+const isBuying = ref(false);
+const walletMessage = ref('');
+
+function buyCredits(amount: string): void {
+    if (isBuying.value) {
+        return;
+    }
+
+    router.post(
+        '/wallet/purchase',
+        // One token per click lets the server ignore accidental repeats.
+        { amount, token: crypto.randomUUID() },
+        {
+            preserveScroll: true,
+            onStart: () => {
+                isBuying.value = true;
+            },
+            onSuccess: () => {
+                walletMessage.value = `$${amount} of credits added.`;
+                void loadEstimate();
+            },
+            onFinish: () => {
+                isBuying.value = false;
+            },
+        },
+    );
+}
+
+
 function getXsrfToken(): string {
     const cookie = document.cookie
         .split('; ')
@@ -143,10 +258,7 @@ async function submitGeneration() {
     successMessage.value = '';
     validationErrors.value = {};
 
-    const referenceImages = referenceImagesText.value
-        .split('\n')
-        .map((url) => url.trim())
-        .filter((url) => url.length > 0);
+    const referenceImages = referenceImageUrls();
 
     const payload = {
         prompt: prompt.value.trim(),
@@ -207,7 +319,7 @@ async function submitGeneration() {
 
         // Reload the dashboard data without navigating away.
         router.reload({
-            only: ['generations', 'billing'],
+            only: ['generations', 'billing', 'wallet'],
         });
     } catch (error) {
         // Keep the key if the network failed. The server may have
@@ -319,7 +431,7 @@ async function pollActiveGenerations(): Promise<void> {
 
         if (statusChanges.some(Boolean)) {
             router.reload({
-                only: ['generations', 'billing'],
+                only: ['generations', 'billing', 'wallet'],
             });
         }
     } finally {
@@ -416,6 +528,8 @@ async function refreshExpiredImages(): Promise<void> {
 }
 
 onMounted(() => {
+    void loadEstimate();
+
     // Check immediately, then every three seconds.
     void pollActiveGenerations();
     void refreshExpiredImages();
@@ -427,6 +541,8 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+    clearTimeout(estimateTimer);
+
     if (pollingTimer !== undefined) {
         clearInterval(pollingTimer);
     }
@@ -438,6 +554,38 @@ onUnmounted(() => {
     <Head title="Generation History" />
 
     <main class="flex flex-1 flex-col gap-6 p-4 md:p-6">
+
+<section class="flex flex-col gap-4 rounded-xl border border-sidebar-border/70 p-4 dark:border-sidebar-border sm:flex-row sm:items-center sm:justify-between md:p-6">
+    <div>
+        <p class="text-sm text-muted-foreground">Available credits</p>
+        <p class="mt-1 text-3xl font-semibold tabular-nums" data-testid="available-credits">
+            {{ formatUsd(wallet.available) }}
+        </p>
+        <p class="mt-1 text-xs text-muted-foreground">
+            1 credit = $1 USD. {{ formatUsd(wallet.reserved) }} is held for generations in progress.
+        </p>
+        <p v-if="walletMessage" role="status" class="mt-2 text-sm text-green-700 dark:text-green-300">
+            {{ walletMessage }}
+        </p>
+    </div>
+
+    <div class="flex flex-col gap-2 sm:items-end">
+        <span class="text-sm font-medium">Buy credits</span>
+        <div class="flex flex-wrap gap-2">
+            <button
+                v-for="pack in wallet.packs"
+                :key="pack"
+                type="button"
+                :disabled="isBuying"
+                class="rounded-md border border-input bg-background px-4 py-2 text-sm font-medium hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+                @click="buyCredits(pack)"
+            >
+                +${{ pack }}
+            </button>
+        </div>
+        <span class="text-xs text-muted-foreground">Demo purchase. No payment is taken.</span>
+    </div>
+</section>
 
 <section class="rounded-xl border border-sidebar-border/70 p-4 dark:border-sidebar-border md:p-6">
     <div class="mb-5">
@@ -536,6 +684,31 @@ onUnmounted(() => {
             </p>
         </div>
 
+        <div
+            class="rounded-md border border-sidebar-border/70 p-3 text-sm dark:border-sidebar-border"
+            aria-live="polite"
+        >
+            <template v-if="estimate">
+                <p>
+                    Estimated cost:
+                    <strong class="tabular-nums" data-testid="estimated-cost">{{ formatUsd(estimate.estimated_price) }}</strong>
+                </p>
+                <p class="mt-1 text-xs text-muted-foreground">
+                    This is an estimate: output and reasoning usage is only known when the image finishes.
+                    You are charged the actual cost once it succeeds, never more than
+                    {{ formatUsd(estimate.maximum_price) }}, and nothing if it fails.
+                </p>
+            </template>
+            <p v-else-if="estimateError" class="text-xs text-muted-foreground">
+                {{ estimateError }}
+            </p>
+            <p v-else class="text-xs text-muted-foreground">Calculating estimate…</p>
+
+            <p v-if="cannotAfford" role="alert" class="mt-2 text-sm text-red-600 dark:text-red-400">
+                You need at least {{ formatUsd(estimate!.maximum_price) }} available to generate this image. Buy credits above to continue.
+            </p>
+        </div>
+
         <p
             v-if="formError"
             role="alert"
@@ -555,7 +728,7 @@ onUnmounted(() => {
         <div class="flex justify-end">
             <button
                 type="submit"
-                :disabled="isSubmitting || !prompt.trim()"
+                :disabled="isSubmitting || !prompt.trim() || cannotAfford"
                 class="rounded-md bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
             >
                 {{ isSubmitting ? 'Submitting...' : 'Generate image' }}
@@ -580,53 +753,23 @@ onUnmounted(() => {
             </div>
         </section>
 
-<section class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+<section class="grid gap-4 sm:grid-cols-3">
     <article class="rounded-xl border border-sidebar-border/70 p-4 dark:border-sidebar-border">
-        <p class="text-sm text-muted-foreground">
-            Successful generations
-        </p>
-        <p class="mt-2 text-2xl font-semibold tabular-nums">
-            {{ billing.successful_generations }}
-        </p>
-        <p class="mt-1 text-xs text-muted-foreground">
-            Successfully completed images
-        </p>
+        <p class="text-sm text-muted-foreground">Successful generations</p>
+        <p class="mt-2 text-2xl font-semibold tabular-nums">{{ billing.successful_generations }}</p>
+        <p class="mt-1 text-xs text-muted-foreground">Successfully completed images</p>
     </article>
 
     <article class="rounded-xl border border-sidebar-border/70 p-4 dark:border-sidebar-border">
-        <p class="text-sm text-muted-foreground">
-            Provider cost
-        </p>
-        <p class="mt-2 text-2xl font-semibold tabular-nums">
-            {{ formatUsd(billing.provider_cost_total) }}
-        </p>
-        <p class="mt-1 text-xs text-muted-foreground">
-            Amount paid to Pixelforge
-        </p>
+        <p class="text-sm text-muted-foreground">Total spent</p>
+        <p class="mt-2 text-2xl font-semibold tabular-nums">{{ formatUsd(billing.customer_charges_total) }}</p>
+        <p class="mt-1 text-xs text-muted-foreground">Charged for successful generations</p>
     </article>
 
     <article class="rounded-xl border border-sidebar-border/70 p-4 dark:border-sidebar-border">
-        <p class="text-sm text-muted-foreground">
-            Customer charges
-        </p>
-        <p class="mt-2 text-2xl font-semibold tabular-nums">
-            {{ formatUsd(billing.customer_charges_total) }}
-        </p>
-        <p class="mt-1 text-xs text-muted-foreground">
-            Total billed to customers
-        </p>
-    </article>
-
-    <article class="rounded-xl border border-sidebar-border/70 p-4 dark:border-sidebar-border">
-        <p class="text-sm text-muted-foreground">
-            Markup
-        </p>
-        <p class="mt-2 text-2xl font-semibold tabular-nums">
-            {{ formatUsd(billing.markup_total) }}
-        </p>
-        <p class="mt-1 text-xs text-muted-foreground">
-            Customer charges minus provider cost
-        </p>
+        <p class="text-sm text-muted-foreground">Failed generations</p>
+        <p class="mt-2 text-2xl font-semibold tabular-nums">$0.000000000</p>
+        <p class="mt-1 text-xs text-muted-foreground">Failed generations are never charged</p>
     </article>
 </section>
 
@@ -757,20 +900,20 @@ onUnmounted(() => {
                     class="grid grid-cols-2 gap-4 border-t border-sidebar-border/70 pt-3 text-sm dark:border-sidebar-border md:min-w-52 md:border-l md:border-t-0 md:pl-4 md:pt-0"
                 >
                     <div>
-                        <p class="text-xs text-muted-foreground">
-                            Provider cost
-                        </p>
+                        <p class="text-xs text-muted-foreground">Estimated</p>
                         <p class="mt-1 font-medium tabular-nums">
-                            {{ formatUsd(generation.provider_cost) }}
+                            {{ generation.estimated_price ? formatUsd(generation.estimated_price) : '—' }}
                         </p>
                     </div>
 
                     <div>
-                        <p class="text-xs text-muted-foreground">
-                            Customer price
-                        </p>
+                        <p class="text-xs text-muted-foreground">Actual cost</p>
                         <p class="mt-1 font-semibold tabular-nums">
-                            {{ formatUsd(generation.customer_price) }}
+                            {{
+                                generation.status === 'succeeded' || generation.status === 'failed'
+                                    ? formatUsd(generation.customer_price)
+                                    : 'Pending'
+                            }}
                         </p>
                     </div>
                 </div>

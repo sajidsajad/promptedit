@@ -19,16 +19,6 @@ it('requires authentication to create a generation', function () {
     $response->assertUnauthorized();
 });
 
-it('requires email verification to create a generation', function () {
-    $user = User::factory()->unverified()->create();
-
-    $response = $this->actingAs($user)->postJson('/generations', [
-        'prompt' => 'A mountain landscape',
-    ]);
-
-    $response->assertForbidden();
-});
-
 it('requires an idempotency key', function () {
     $user = User::factory()->create();
 

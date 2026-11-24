@@ -7,7 +7,9 @@ use App\Http\Requests\StoreGenerationRequest;
 use App\Jobs\SubmitGeneration;
 use App\Models\Generation;
 use App\Services\Generations\GenerationCreationService;
+use App\Services\Generations\GenerationEstimator;
 use App\Services\Generations\GenerationProviderService;
+use Illuminate\Http\Client\HttpClientException;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -21,7 +23,8 @@ class GenerationController extends Controller
      */
     public function store(
         StoreGenerationRequest $request,
-        GenerationCreationService $service
+        GenerationCreationService $service,
+        GenerationEstimator $estimator
     ): JsonResponse {
         $idempotencyKey = $request->header('Idempotency-Key');
 
@@ -35,6 +38,16 @@ class GenerationController extends Controller
             throw ValidationException::withMessages([
                 'Idempotency-Key' => 'The Idempotency-Key may not exceed 255 characters.',
             ]);
+        }
+
+        $insufficient = $this->insufficientCreditsResponse(
+            $request,
+            $estimator,
+            $idempotencyKey
+        );
+
+        if ($insufficient !== null) {
+            return $insufficient;
         }
 
         try {
@@ -97,6 +110,7 @@ class GenerationController extends Controller
                 'quality' => $record->quality,
                 'status' => $record->status,
                 'usage' => $record->usage,
+                'estimated_price' => $record->estimated_price,
                 'provider_cost' => $record->provider_cost,
                 'customer_price' => $record->customer_price,
                 'image_url' => $record->image_url,
@@ -108,5 +122,60 @@ class GenerationController extends Controller
                 'created_at' => $record->created_at,
             ],
         ]);
+    }
+
+    /**
+     * Refuse a new generation the user cannot afford, before anything is
+     * created or reserved.
+     *
+     * A replay of an existing idempotency key is never blocked, and a
+     * pricing outage does not block either: the submission job re-checks
+     * the wallet when it reserves credits.
+     */
+    private function insufficientCreditsResponse(
+        StoreGenerationRequest $request,
+        GenerationEstimator $estimator,
+        string $idempotencyKey
+    ): ?JsonResponse {
+        $user = $request->user();
+
+        $isReplay = Generation::query()
+            ->where('user_id', $user->id)
+            ->where('idempotency_key', $idempotencyKey)
+            ->exists();
+
+        if ($isReplay) {
+            return null;
+        }
+
+        try {
+            $estimate = $estimator->estimate(
+                $request->validated('prompt'),
+                $request->validated('size'),
+                $request->validated('quality'),
+                count($request->validated('reference_images') ?? [])
+            );
+        } catch (HttpClientException|UnexpectedValueException $exception) {
+            report($exception);
+
+            return null;
+        }
+
+        $wallet = $user->wallet;
+
+        $available = $wallet
+            ? bcsub($wallet->balance, $wallet->reserved_balance, 9)
+            : '0.000000000';
+
+        if (bccomp($available, $estimate['maximum_price'], 9) >= 0) {
+            return null;
+        }
+
+        return response()->json([
+            'message' => 'You do not have enough credits for this generation. Add credits and try again.',
+            'code' => 'insufficient_credits',
+            'required' => $estimate['maximum_price'],
+            'available' => $available,
+        ], 402);
     }
 }

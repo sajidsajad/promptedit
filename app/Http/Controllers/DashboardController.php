@@ -84,6 +84,7 @@ class DashboardController extends Controller
                 'status',
                 'provider_cost',
                 'customer_price',
+                'estimated_price',
                 'image_url',
                 'image_url_expires_at',
                 'error_code',
@@ -102,6 +103,7 @@ class DashboardController extends Controller
                 'status' => $generation->status,
                 'provider_cost' => $generation->provider_cost,
                 'customer_price' => $generation->customer_price,
+                'estimated_price' => $generation->estimated_price,
                 'image_url' => $generation->image_url,
                 'image_url_expires_at' => $generation->image_url_expires_at?->toISOString(),
                 'error_code' => $generation->error_code,
@@ -111,7 +113,18 @@ class DashboardController extends Controller
                 'created_at' => $generation->created_at?->toISOString(),
             ]);
 
+        $wallet = $request->user()->wallet;
+
+        $balance = $wallet?->balance ?? '0.000000000';
+        $reserved = $wallet?->reserved_balance ?? '0.000000000';
+
         return Inertia::render('Dashboard', [
+            'wallet' => [
+                'balance' => $balance,
+                'reserved' => $reserved,
+                'available' => bcsub($balance, $reserved, 9),
+                'packs' => WalletController::PACKS,
+            ],
             'generations' => $generations,
             'filters' => [
                 'status' => $status,
